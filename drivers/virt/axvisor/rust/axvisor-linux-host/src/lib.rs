@@ -6,6 +6,10 @@ use core::{
 };
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+#[cfg(feature = "control")]
+use ax_errno::{AxError, AxResult};
+#[cfg(feature = "control")]
+use axvisor_api::control::{self, ControlOps, PinnedUserPages};
 use axvisor_api::{
     api_impl,
     arch::ArchIf,
@@ -17,10 +21,6 @@ use axvisor_api::{
     task::{TaskHandle, TaskIf, TaskOptions},
     time::TimeIf,
 };
-#[cfg(feature = "control")]
-use axvisor_api::control::{self, ControlOps, PinnedUserPages};
-#[cfg(feature = "control")]
-use ax_errno::{AxError, AxResult};
 
 extern crate alloc;
 
@@ -35,8 +35,15 @@ unsafe extern "C" {
     fn axvisor_linux_console_read_bytes(bytes: *mut u8, length: usize) -> usize;
     fn axvisor_linux_time_current_time_nanos() -> u64;
     fn axvisor_linux_time_set_oneshot_timer(deadline_nanos: u64);
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "loongarch64",
+        target_arch = "riscv64"
+    ))]
     fn axvisor_linux_arch_host_fdt_paddr() -> usize;
+    #[cfg(target_arch = "x86_64")]
     fn axvisor_linux_arch_host_tsc_frequency_mhz() -> u32;
+    #[cfg(target_arch = "riscv64")]
     fn axvisor_linux_arch_remote_hfence_vvma_all();
     fn axvisor_linux_memory_alloc_frame() -> usize;
     fn axvisor_linux_memory_alloc_contiguous(num_frames: usize, align: usize) -> usize;
@@ -407,9 +414,7 @@ impl control::ControlIf for LinuxHost {
         _ops: ControlOps,
         mmap_area: Option<control::MmapAreaId>,
     ) -> AxResult<control::Fd> {
-        let fd = unsafe {
-            axvisor_linux_control_create_fd(control_file, mmap_area.unwrap_or(0))
-        };
+        let fd = unsafe { axvisor_linux_control_create_fd(control_file, mmap_area.unwrap_or(0)) };
         (fd >= 0).then_some(fd).ok_or(AxError::Io)
     }
 
@@ -418,13 +423,9 @@ impl control::ControlIf for LinuxHost {
         (id != 0).then_some(id).ok_or(AxError::BadFileDescriptor)
     }
 
-    fn write_user_fd_ref(
-        user_fd_ref: control::UserFdRefId,
-        buf: &[u8],
-    ) -> AxResult<usize> {
-        let ret = unsafe {
-            axvisor_linux_control_write_fd_ref(user_fd_ref, buf.as_ptr(), buf.len())
-        };
+    fn write_user_fd_ref(user_fd_ref: control::UserFdRefId, buf: &[u8]) -> AxResult<usize> {
+        let ret =
+            unsafe { axvisor_linux_control_write_fd_ref(user_fd_ref, buf.as_ptr(), buf.len()) };
         if ret >= 0 {
             Ok(ret as usize)
         } else if ret == -(11isize) {
@@ -436,13 +437,9 @@ impl control::ControlIf for LinuxHost {
         }
     }
 
-    fn read_user_fd_ref(
-        user_fd_ref: control::UserFdRefId,
-        buf: &mut [u8],
-    ) -> AxResult<usize> {
-        let ret = unsafe {
-            axvisor_linux_control_read_fd_ref(user_fd_ref, buf.as_mut_ptr(), buf.len())
-        };
+    fn read_user_fd_ref(user_fd_ref: control::UserFdRefId, buf: &mut [u8]) -> AxResult<usize> {
+        let ret =
+            unsafe { axvisor_linux_control_read_fd_ref(user_fd_ref, buf.as_mut_ptr(), buf.len()) };
         if ret >= 0 {
             Ok(ret as usize)
         } else if ret == -(11isize) {
@@ -464,25 +461,16 @@ impl control::ControlIf for LinuxHost {
         (area != 0).then_some(area).ok_or(AxError::NoMemory)
     }
 
-    fn read_mmap_area(
-        area: control::MmapAreaId,
-        offset: usize,
-        buf: &mut [u8],
-    ) -> AxResult {
+    fn read_mmap_area(area: control::MmapAreaId, offset: usize, buf: &mut [u8]) -> AxResult {
         let ret = unsafe {
             axvisor_linux_control_read_mmap_area(area, offset, buf.as_mut_ptr(), buf.len())
         };
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
-    fn write_mmap_area(
-        area: control::MmapAreaId,
-        offset: usize,
-        buf: &[u8],
-    ) -> AxResult {
-        let ret = unsafe {
-            axvisor_linux_control_write_mmap_area(area, offset, buf.as_ptr(), buf.len())
-        };
+    fn write_mmap_area(area: control::MmapAreaId, offset: usize, buf: &[u8]) -> AxResult {
+        let ret =
+            unsafe { axvisor_linux_control_write_mmap_area(area, offset, buf.as_ptr(), buf.len()) };
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
@@ -492,16 +480,13 @@ impl control::ControlIf for LinuxHost {
     }
 
     fn copy_from_user(addr: usize, buf: &mut [u8]) -> AxResult {
-        let ret = unsafe {
-            axvisor_linux_control_copy_from_user(buf.as_mut_ptr(), addr, buf.len())
-        };
+        let ret =
+            unsafe { axvisor_linux_control_copy_from_user(buf.as_mut_ptr(), addr, buf.len()) };
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
     fn copy_to_user(addr: usize, buf: &[u8]) -> AxResult {
-        let ret = unsafe {
-            axvisor_linux_control_copy_to_user(addr, buf.as_ptr(), buf.len())
-        };
+        let ret = unsafe { axvisor_linux_control_copy_to_user(addr, buf.as_ptr(), buf.len()) };
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
@@ -580,16 +565,13 @@ pub extern "C" fn axvisor_linux_control_open() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn axvisor_linux_control_close(control_file: u64) -> i32 {
     let ops = *CONTROL_OPS.lock();
-    ops.map(|ops| (ops.close)(control_file).is_ok()).unwrap_or(false) as i32
+    ops.map(|ops| (ops.close)(control_file).is_ok())
+        .unwrap_or(false) as i32
 }
 
 #[cfg(feature = "control")]
 #[unsafe(no_mangle)]
-pub extern "C" fn axvisor_linux_control_ioctl(
-    control_file: u64,
-    cmd: u32,
-    arg: usize,
-) -> isize {
+pub extern "C" fn axvisor_linux_control_ioctl(control_file: u64, cmd: u32, arg: usize) -> isize {
     let ops = *CONTROL_OPS.lock();
     match ops {
         Some(ops) => match (ops.ioctl)(control_file, cmd, arg) {

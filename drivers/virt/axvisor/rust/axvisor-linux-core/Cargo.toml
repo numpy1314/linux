@@ -17,8 +17,8 @@ vmx = ["axvisor_core/vmx"]
 conformance-test = ["dep:axvisor-linux-conformance"]
 
 [dependencies]
-axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", branch = "axvisor-core", default-features = false }
-axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", branch = "axvisor-core", default-features = false }
+axvisor_core = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", default-features = false }
+axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", default-features = false }
 axvisor-linux-conformance = { path = "../axvisor-linux-conformance", optional = true }
-ax-percpu = { git = "https://github.com/Ivans-11/tgoskits", branch = "axvisor-core", features = ["custom-base", "external-base"] }
+ax-percpu = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", features = ["custom-base", "external-base"] }
 log = "0.4"
