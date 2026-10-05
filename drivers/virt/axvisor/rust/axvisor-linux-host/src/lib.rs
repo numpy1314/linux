@@ -24,6 +24,8 @@ use axvisor_api::{
 
 extern crate alloc;
 
+mod wait;
+
 unsafe extern "C" {
     fn axvisor_linux_host_get_cpu_num() -> usize;
     fn axvisor_linux_host_current_cpu() -> usize;
@@ -61,6 +63,8 @@ unsafe extern "C" {
     fn axvisor_linux_wait_queue_create() -> usize;
     fn axvisor_linux_wait_queue_destroy(queue: usize);
     fn axvisor_linux_wait_queue_wait(queue: usize);
+    fn axvisor_linux_wait_queue_generation(queue: usize) -> u64;
+    fn axvisor_linux_wait_queue_wait_since(queue: usize, generation: u64);
     fn axvisor_linux_wait_queue_wake_one(queue: usize);
     fn axvisor_linux_wait_queue_wake_all(queue: usize);
     fn axvisor_linux_spawn_task(
@@ -216,9 +220,11 @@ impl SyncIf for LinuxHost {
         unsafe { axvisor_linux_wait_queue_wait(queue) }
     }
     fn wait_queue_wait_until(queue: usize, condition: Box<dyn Fn() -> bool + Send + 'static>) {
-        while !condition() {
-            Self::wait_queue_wait(queue);
-        }
+        wait::wait_until(
+            condition,
+            || unsafe { axvisor_linux_wait_queue_generation(queue) },
+            |generation| unsafe { axvisor_linux_wait_queue_wait_since(queue, generation) },
+        );
     }
     fn wait_queue_wake_one(queue: usize) {
         unsafe { axvisor_linux_wait_queue_wake_one(queue) }

@@ -64,6 +64,8 @@ void axvisor_linux_task_yield(void);
 unsigned long axvisor_linux_wait_queue_create(void);
 void axvisor_linux_wait_queue_destroy(unsigned long queue);
 void axvisor_linux_wait_queue_wait(unsigned long queue);
+u64 axvisor_linux_wait_queue_generation(unsigned long queue);
+void axvisor_linux_wait_queue_wait_since(unsigned long queue, u64 generation);
 void axvisor_linux_wait_queue_wake_one(unsigned long queue);
 void axvisor_linux_wait_queue_wake_all(unsigned long queue);
 unsigned long axvisor_linux_spawn_task(int (*entry)(void *), void *data,

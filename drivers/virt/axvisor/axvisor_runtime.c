@@ -839,66 +839,6 @@ void axvisor_linux_irq_local_restore(unsigned long flags)
 	local_irq_restore(flags);
 }
 
-struct axvisor_wait_queue {
-	wait_queue_head_t head;
-	atomic_t generation;
-};
-
-unsigned long axvisor_linux_wait_queue_create(void)
-{
-	struct axvisor_wait_queue *queue;
-	gfp_t flags = irqs_disabled() ? GFP_ATOMIC : GFP_KERNEL;
-
-	queue = kmalloc(sizeof(*queue), flags);
-	if (!queue)
-		return 0;
-	init_waitqueue_head(&queue->head);
-	atomic_set(&queue->generation, 0);
-	return (unsigned long)queue;
-}
-
-void axvisor_linux_wait_queue_destroy(unsigned long handle)
-{
-	kfree((void *)handle);
-}
-
-void axvisor_linux_wait_queue_wait(unsigned long handle)
-{
-	struct axvisor_wait_queue *queue = (void *)handle;
-	int generation;
-
-	if (!queue)
-		return;
-	generation = atomic_read(&queue->generation);
-	if (irqs_disabled() || in_atomic()) {
-		while (atomic_read(&queue->generation) == generation)
-			cpu_relax();
-		return;
-	}
-	wait_event(queue->head,
-		   atomic_read(&queue->generation) != generation);
-}
-
-void axvisor_linux_wait_queue_wake_one(unsigned long handle)
-{
-	struct axvisor_wait_queue *queue = (void *)handle;
-
-	if (!queue)
-		return;
-	atomic_inc(&queue->generation);
-	wake_up(&queue->head);
-}
-
-void axvisor_linux_wait_queue_wake_all(unsigned long handle)
-{
-	struct axvisor_wait_queue *queue = (void *)handle;
-
-	if (!queue)
-		return;
-	atomic_inc(&queue->generation);
-	wake_up_all(&queue->head);
-}
-
 struct axvisor_task_start {
 	int (*entry)(void *data);
 	void *data;

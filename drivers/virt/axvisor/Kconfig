@@ -1,5 +1,6 @@
 config AXVISOR_LINUX_BRIDGE
 	bool "AxVisor Linux host bridge"
+	select AXVISOR_LINUX_WAIT
 	default n
 	help
 	  Build the Linux host provider and link the no_std AxVisor Rust domain
@@ -19,3 +20,16 @@ config AXVISOR_LINUX_CONFORMANCE
 	default n
 	help
 	  Build the host-only runner for the shared AxVisor contract tests.
+
+config AXVISOR_LINUX_WAIT
+	bool
+
+config AXVISOR_LINUX_WAIT_KUNIT_TEST
+	bool "Test AxVisor Linux wait queue notification ordering"
+	depends on KUNIT=y
+	select AXVISOR_LINUX_WAIT
+	default n
+	help
+	  Exercise the actual Linux wait queue implementation without linking
+	  the Rust bridge or enabling virtualization. Includes a recoverable
+	  negative control for the old predicate-then-generation ordering.

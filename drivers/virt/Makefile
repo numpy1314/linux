@@ -10,4 +10,4 @@ obj-y				+= vboxguest/
 obj-$(CONFIG_NITRO_ENCLAVES)	+= nitro_enclaves/
 obj-$(CONFIG_ACRN_HSM)		+= acrn/
 obj-y				+= coco/
-obj-$(CONFIG_AXVISOR_LINUX_BRIDGE) += axvisor/
+obj-y				+= axvisor/
