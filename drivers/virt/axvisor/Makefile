@@ -1,3 +1,4 @@
+obj-$(CONFIG_AXVISOR_ARM64_VHE_PROBE) += axvisor_arm64_probe.o
 obj-$(CONFIG_AXVISOR_LINUX_WAIT) += axvisor_wait.o
 
 obj-$(CONFIG_AXVISOR_LINUX_BRIDGE) += axvisor_linux.o

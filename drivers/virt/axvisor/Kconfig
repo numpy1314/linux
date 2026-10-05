@@ -1,3 +1,14 @@
+config AXVISOR_ARM64_VHE_PROBE
+	bool "AxVisor ARM64 read-only VHE preflight probe"
+	depends on ARM64
+	default n
+	help
+	  Sample the current execution level and virtualization features on
+	  every online CPU without installing vectors or entering a guest.
+	  This does not build the Rust bridge or authorize later guest entry.
+	  The initial candidate profile requires 4 KiB pages, a DT GICv3,
+	  and CONFIG_KVM=n. Unsupported systems are logged and left unchanged.
+
 config AXVISOR_LINUX_BRIDGE
 	bool "AxVisor Linux host bridge"
 	select AXVISOR_LINUX_WAIT
