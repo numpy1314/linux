@@ -121,7 +121,6 @@ static void axvisor_wait_atomic_and_wrap(struct kunit *test)
 struct axvisor_wait_test_context {
 	unsigned long queue;
 	u64 generation;
-	bool old_order;
 	struct completion done;
 	wait_queue_head_t stop;
 };
@@ -130,10 +129,7 @@ static int axvisor_wait_test_thread(void *arg)
 {
 	struct axvisor_wait_test_context *ctx = arg;
 
-	if (ctx->old_order)
-		axvisor_linux_wait_queue_wait(ctx->queue);
-	else
-		axvisor_linux_wait_queue_wait_since(ctx->queue, ctx->generation);
+	axvisor_linux_wait_queue_wait_since(ctx->queue, ctx->generation);
 	complete(&ctx->done);
 	/* Keep the context and task alive until the test has checked the result. */
 	wait_event(ctx->stop, kthread_should_stop());
@@ -159,7 +155,7 @@ static bool axvisor_wait_registered(struct axvisor_wait_queue *queue)
 
 static void axvisor_wait_thread_case(struct kunit *test, bool old_order)
 {
-	struct axvisor_wait_test_context ctx = { .old_order = old_order };
+	struct axvisor_wait_test_context ctx;
 	struct task_struct *task;
 	bool registered;
 
@@ -169,8 +165,13 @@ static void axvisor_wait_thread_case(struct kunit *test, bool old_order)
 	init_waitqueue_head(&ctx.stop);
 	ctx.generation = axvisor_linux_wait_queue_generation(ctx.queue);
 	/* Model a true predicate + wake between the old check and snapshot. */
-	if (old_order)
+	if (old_order) {
 		axvisor_linux_wait_queue_wake_all(ctx.queue);
+		ctx.generation = axvisor_linux_wait_queue_generation(ctx.queue);
+	}
+	/* Fix the token before spawning so even a delayed worker observes the
+	 * recovery wake. The old-order token has already missed the first wake.
+	 */
 	task = kthread_run(axvisor_wait_test_thread, &ctx, "axvisor-wait-test");
 	if (IS_ERR(task)) {
 		axvisor_linux_wait_queue_destroy(ctx.queue);
