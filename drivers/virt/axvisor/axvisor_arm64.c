@@ -41,14 +41,15 @@ static bool axvisor_vhe_cpu_supported(void)
 	if ((mmfr0 & 15) != axvisor_pa_range ||
 	    read_sysreg(midr_el1) != axvisor_midr ||
 	    read_sysreg(id_aa64isar0_el1) != axvisor_isar0 ||
-	    read_sysreg(ctr_el0) != axvisor_ctr ||
-	    read_sysreg(ich_vtr_el2) != axvisor_ich_vtr)
+	    read_sysreg(ctr_el0) != axvisor_ctr)
 		return false;
 	pfr0 = read_sysreg(id_aa64pfr0_el1);
 	gic = SYS_FIELD_GET(ID_AA64PFR0_EL1, GIC, pfr0);
 	granule = SYS_FIELD_GET(ID_AA64MMFR0_EL1, TGRAN4, mmfr0);
 	granule2 = SYS_FIELD_GET(ID_AA64MMFR0_EL1, TGRAN4_2, mmfr0);
 	if ((gic != 1 && gic != 3) || granule > 1 || granule2 == 1 || granule2 > 3)
+		return false;
+	if (read_sysreg(ich_vtr_el2) != axvisor_ich_vtr)
 		return false;
 	/* Four LRs are the minimum supported virtual GIC CPU interface. */
 	lrs = (axvisor_ich_vtr & 31) + 1;
@@ -70,7 +71,7 @@ int axvisor_linux_vhe_prepare(void)
 	struct resource dist, redist;
 	void __iomem *base;
 	atomic_t failed = ATOMIC_INIT(0);
-	unsigned int cpu;
+	unsigned int cpu, gic;
 
 	if (IS_ENABLED(CONFIG_KVM) || PAGE_SHIFT != 12 ||
 	    IS_ENABLED(CONFIG_ARM64_POE) || IS_ENABLED(CONFIG_HOTPLUG_CPU) ||
@@ -82,6 +83,9 @@ int axvisor_linux_vhe_prepare(void)
 	/* Snapshot guest-visible CPU facts; the profile requires homogeneous CPUs. */
 	if (read_sysreg(CurrentEL) != CurrentEL_EL2 ||
 	    SYS_FIELD_GET(ID_AA64MMFR1_EL1, VH, read_sysreg(id_aa64mmfr1_el1)) != 1)
+		return -EOPNOTSUPP;
+	gic = SYS_FIELD_GET(ID_AA64PFR0_EL1, GIC, read_sysreg(id_aa64pfr0_el1));
+	if (gic != 1 && gic != 3)
 		return -EOPNOTSUPP;
 	axvisor_midr = read_sysreg(midr_el1);
 	axvisor_isar0 = read_sysreg(id_aa64isar0_el1);
