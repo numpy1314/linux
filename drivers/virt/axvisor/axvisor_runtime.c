@@ -17,6 +17,7 @@
 #include <linux/percpu.h>
 #include <linux/spinlock.h>
 #include <linux/of_fdt.h>
+#include <linux/libfdt.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/ioport.h>
@@ -157,6 +158,10 @@ static int axvisor_linux_control_release_anon(struct inode *inode,
 	(void)inode;
 	if (!anon)
 		return -EINVAL;
+	if (!anon->control_file) {
+		kfree(anon);
+		return 0;
+	}
 	if (axvisor_linux_control_close(anon->control_file)) {
 		kfree(anon);
 		return 0;
@@ -528,6 +533,43 @@ int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area)
 		return fd;
 	}
 }
+
+int axvisor_linux_control_create_fd_at(u64 control_file, int __user *result)
+{
+	struct axvisor_linux_control_anon *anon;
+	struct file *file;
+	int fd, error;
+
+	if (!control_file)
+		return -EINVAL;
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+	anon = kzalloc(sizeof(*anon), GFP_KERNEL);
+	if (!anon) {
+		error = -ENOMEM;
+		goto release_fd;
+	}
+	file = anon_inode_getfile("axvisor-kvm", &axvisor_linux_control_anon_fops,
+				 anon, O_RDWR);
+	if (IS_ERR(file)) {
+		error = PTR_ERR(file);
+		kfree(anon);
+		goto release_fd;
+	}
+	if (copy_to_user(result, &fd, sizeof(fd))) {
+		/* Core still owns the id; release only the unpublished file. */
+		fput(file);
+		error = -EFAULT;
+		goto release_fd;
+	}
+	anon->control_file = control_file;
+	fd_install(fd, file);
+	return 0;
+release_fd:
+	put_unused_fd(fd);
+	return error;
+}
 #endif
 
 /* Names expected by zerocopy, mapped to Linux's linker symbols. */
@@ -603,12 +645,12 @@ static void axvisor_linux_timer_work(struct work_struct *work)
 	axvisor_linux_timer_interrupt();
 }
 
-static DECLARE_WORK(axvisor_host_timer_work, axvisor_linux_timer_work);
+static DEFINE_PER_CPU(struct work_struct, axvisor_host_timer_work);
 
 static enum hrtimer_restart axvisor_linux_timer_callback(struct hrtimer *timer)
 {
 	(void)timer;
-	schedule_work(&axvisor_host_timer_work);
+	schedule_work_on(smp_processor_id(), this_cpu_ptr(&axvisor_host_timer_work));
 	return HRTIMER_NORESTART;
 }
 
@@ -623,7 +665,8 @@ void axvisor_linux_host_init_percpu(void)
 	timer = this_cpu_ptr(&axvisor_host_timer);
 	initialized = this_cpu_ptr(&axvisor_host_timer_initialized);
 	if (!*initialized) {
-		hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		INIT_WORK(this_cpu_ptr(&axvisor_host_timer_work), axvisor_linux_timer_work);
+		hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
 		timer->function = axvisor_linux_timer_callback;
 		*initialized = true;
 	}
@@ -749,7 +792,8 @@ void axvisor_linux_time_set_oneshot_timer(u64 deadline_nanos)
 	timer = this_cpu_ptr(&axvisor_host_timer);
 	initialized = this_cpu_ptr(&axvisor_host_timer_initialized);
 	if (!*initialized) {
-		hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		INIT_WORK(this_cpu_ptr(&axvisor_host_timer_work), axvisor_linux_timer_work);
+		hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
 		timer->function = axvisor_linux_timer_callback;
 		*initialized = true;
 	}
@@ -757,7 +801,7 @@ void axvisor_linux_time_set_oneshot_timer(u64 deadline_nanos)
 	 * each exit postpone an already earlier host deadline indefinitely. */
 	if (!hrtimer_active(timer) ||
 	    ktime_before(expires, hrtimer_get_expires(timer)))
-		hrtimer_start(timer, expires, HRTIMER_MODE_ABS);
+		hrtimer_start(timer, expires, HRTIMER_MODE_ABS_PINNED);
 	preempt_enable();
 }
 static unsigned long axvisor_host_fdt_paddr_saved;
@@ -766,12 +810,24 @@ void axvisor_linux_arch_capture_host_fdt(void)
 {
 #ifdef CONFIG_RISCV
 	axvisor_host_fdt_paddr_saved = initial_boot_params ? dtb_early_pa : 0;
+#elif defined(CONFIG_ARM64)
+	/* The early FDT mapping is not a linear-map address. Retain a normal
+	 * RAM copy before init memory and early mappings can be reclaimed. */
+	if (initial_boot_params) {
+		void *copy = kmemdup(initial_boot_params,
+				    fdt_totalsize(initial_boot_params), GFP_KERNEL);
+
+		if (copy)
+			axvisor_host_fdt_paddr_saved = virt_to_phys(copy);
+	}
 #else
 	axvisor_host_fdt_paddr_saved = 0;
 #endif
 	pr_info("axvisor-linux: host FDT physical address %#lx\n",
 		axvisor_host_fdt_paddr_saved);
 }
+
+
 
 unsigned long axvisor_linux_arch_host_fdt_paddr(void)
 {
@@ -939,6 +995,7 @@ unsigned long axvisor_linux_memory_alloc_contiguous(size_t num_frames, size_t al
 	 * allocator for those ranges so that they remain normal direct-mapped RAM
 	 * and can be returned through free_contig_range(). */
 	if (num_frames > MAX_ORDER_NR_PAGES) {
+#ifdef CONFIG_CONTIG_ALLOC
 		struct page *pages;
 		unsigned long phys;
 
@@ -956,6 +1013,9 @@ unsigned long axvisor_linux_memory_alloc_contiguous(size_t num_frames, size_t al
 		p = page_address(pages);
 		memset(p, 0, num_frames << PAGE_SHIFT);
 		return phys;
+#else
+		return 0;
+#endif
 	}
 	p = alloc_pages_exact(num_frames << PAGE_SHIFT, gfp | __GFP_ZERO);
 	if (!p || (align > 1 && ((unsigned long)p & (align - 1)))) {

@@ -79,7 +79,14 @@ unsafe extern "C" {
     fn axvisor_linux_dispatch_host_irq(vector: usize) -> bool;
     #[cfg(target_arch = "x86_64")]
     fn axvisor_linux_dispatch_host_system_irq(vector: usize) -> bool;
+    #[cfg(target_arch = "x86_64")]
     fn axvisor_linux_prepare_irq_vector(vector: usize) -> bool;
+    #[cfg(target_arch = "aarch64")]
+    fn axvisor_linux_arm64_gic_info(which: u32) -> usize;
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn axvisor_linux_vhe_enter() -> isize;
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn axvisor_linux_vhe_exit(token: usize);
     #[cfg(feature = "control")]
     fn axvisor_linux_control_register_endpoint() -> i32;
     #[cfg(feature = "control")]
@@ -87,6 +94,8 @@ unsafe extern "C" {
     #[cfg(feature = "control")]
     fn axvisor_linux_control_copy_to_user(dst: usize, src: *const u8, length: usize) -> i32;
     #[cfg(feature = "control")]
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn axvisor_linux_control_create_fd_at(control_file: u64, result: usize) -> i32;
     fn axvisor_linux_control_create_fd(control_file: u64, mmap_area: u64) -> i32;
     #[cfg(feature = "control")]
     fn axvisor_linux_control_create_mmap_area(length: usize) -> u64;
@@ -186,6 +195,52 @@ impl TimeIf for LinuxHost {
 
 #[api_impl]
 impl ArchIf for LinuxHost {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn vhe_host_enter() -> ax_errno::AxResult<usize> {
+        let token = unsafe { axvisor_linux_vhe_enter() };
+        if token < 0 {
+            Err(ax_errno::AxError::Unsupported)
+        } else {
+            Ok(token as usize)
+        }
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn vhe_host_exit(token: usize) {
+        unsafe { axvisor_linux_vhe_exit(token) }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn hardware_inject_virtual_interrupt(_vector: u8) {
+        panic!("Linux requires the vCPU-owned VHE interrupt queue");
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn read_vgicd_typer() -> u32 {
+        unsafe { axvisor_linux_arm64_gic_info(2) as u32 }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn read_vgicd_iidr() -> u32 {
+        unsafe { axvisor_linux_arm64_gic_info(3) as u32 }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn get_host_gicd_base() -> PhysAddr {
+        PhysAddr::from_usize(unsafe { axvisor_linux_arm64_gic_info(0) })
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn get_host_gicr_base() -> PhysAddr {
+        PhysAddr::from_usize(unsafe { axvisor_linux_arm64_gic_info(1) })
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn fetch_irq() -> u64 {
+        // Physical IRQ acknowledgement remains exclusively in Linux's GIC driver.
+        1023
+    }
+
     #[cfg(any(
         target_arch = "aarch64",
         target_arch = "loongarch64",
@@ -422,6 +477,16 @@ impl control::ControlIf for LinuxHost {
     ) -> AxResult<control::Fd> {
         let fd = unsafe { axvisor_linux_control_create_fd(control_file, mmap_area.unwrap_or(0)) };
         (fd >= 0).then_some(fd).ok_or(AxError::Io)
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn create_user_fd_at(control_file: u64, _ops: ControlOps, user_address: usize) -> AxResult {
+        match unsafe { axvisor_linux_control_create_fd_at(control_file, user_address) } {
+            0 => Ok(()),
+            -14 => Err(AxError::BadAddress),
+            -12 => Err(AxError::NoMemory),
+            _ => Err(AxError::Io),
+        }
     }
 
     fn get_user_fd_ref(fd: control::Fd) -> AxResult<control::UserFdRefId> {

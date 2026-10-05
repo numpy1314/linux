@@ -1,5 +1,7 @@
 #![no_std]
 
+extern crate alloc;
+
 use core::{
     alloc::{GlobalAlloc, Layout},
     sync::atomic::{AtomicBool, Ordering},
@@ -28,6 +30,37 @@ fn boot_log(message: &[u8]) {
 struct LinuxLogger;
 static LOGGER: LinuxLogger = LinuxLogger;
 
+#[cfg(feature = "vhe-selftest")]
+#[unsafe(no_mangle)]
+pub extern "C" fn axvisor_linux_vhe_selftest() -> i32 {
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+    for cpu in 0..axvisor_api::host::get_host_cpu_num() {
+        let task = axvisor_api::task::spawn_task(
+            axvisor_api::task::TaskOptions {
+                name: alloc::format!("vhe-test-init-{cpu}"),
+                stack_size: 65536,
+                cpu_set: Some(1 << cpu),
+            },
+            || {
+                axvisor_api::host::init_percpu();
+                axvisor_core::vmm::init_timer_percpu();
+            },
+        );
+        axvisor_api::task::join_task(task);
+    }
+    match arm_vcpu::vhe_test::run() {
+        Ok(()) => {
+            boot_log(b"VHE-TEST summary=PASS\n");
+            0
+        }
+        Err(e) => {
+            log::error!("VHE-TEST summary=FAIL error={e:?}");
+            -1
+        }
+    }
+}
+
 /// Set the architecture per-CPU register for the current host CPU.  This is
 /// exported as a C shim because the Linux host adapter is linked as a
 /// standalone object while ax-percpu itself is included by this core library.
@@ -45,18 +78,28 @@ impl log::Log for LinuxLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        struct Writer;
+        struct Writer {
+            buffer: [u8; 512],
+            length: usize,
+        }
         impl core::fmt::Write for Writer {
             fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                boot_log(s.as_bytes());
+                let count = s.len().min(self.buffer.len() - self.length);
+                self.buffer[self.length..self.length + count]
+                    .copy_from_slice(&s.as_bytes()[..count]);
+                self.length += count;
                 Ok(())
             }
         }
-        let mut writer = Writer;
+        let mut writer = Writer {
+            buffer: [0; 512],
+            length: 0,
+        };
         let _ = core::fmt::Write::write_fmt(
             &mut writer,
             format_args!("axvisor-linux: [{}] {}\n", record.level(), record.args()),
         );
+        boot_log(&writer.buffer[..writer.length]);
     }
 
     fn flush(&self) {}
@@ -162,4 +205,10 @@ pub extern "C" fn axvisor_linux_handle_irq(vector: usize) -> bool {
         }
     }
     axvisor_api::irq::handle_irq(vector)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[unsafe(no_mangle)]
+pub extern "C" fn axvisor_linux_arm64_vhe_enabled() -> bool {
+    cfg!(feature = "arm-vhe")
 }

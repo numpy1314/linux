@@ -25,6 +25,19 @@ config AXVISOR_LINUX_CONTROL
 	help
 	  Publish AxVisor's KVM-compatible control endpoint as /dev/kvm.
 
+config AXVISOR_ARM64_VHE
+	bool "AxVisor Linux VHE ownership boundary"
+	depends on ARM64 && AXVISOR_LINUX_BRIDGE && !KVM && ARM64_4K_PAGES
+	default n
+	help
+	  Requires the Rust arm-vhe feature and a DT GICv3 host at EL2.
+	  Admission fails before publishing the control endpoint on other hosts.
+
+config AXVISOR_ARM64_VHE_SELFTEST
+	bool "Run the shared VHE world-switch smoke gates"
+	depends on ARM64 && AXVISOR_LINUX_BRIDGE && !KVM && ARM64_4K_PAGES
+	default n
+
 config AXVISOR_LINUX_CONFORMANCE
 	bool "AxVisor host-contract conformance runner"
 	depends on AXVISOR_LINUX_BRIDGE

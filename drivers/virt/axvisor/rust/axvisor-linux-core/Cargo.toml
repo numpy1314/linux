@@ -10,6 +10,8 @@ crate-type = ["staticlib"]
 [features]
 default = []
 control = ["axvisor_api/control", "axvisor_core/control"]
+arm-vhe = ["axvisor_api/arm-vhe", "axvisor_core/arm-vhe"]
+vhe-selftest = ["arm-vhe", "dep:arm_vcpu", "arm_vcpu/vhe-selftest"]
 shell = ["axvisor_api/shell", "axvisor_core/shell"]
 sstc = ["axvisor_core/sstc"]
 svm = ["axvisor_core/svm"]
@@ -17,8 +19,9 @@ vmx = ["axvisor_core/vmx"]
 conformance-test = ["dep:axvisor-linux-conformance"]
 
 [dependencies]
-axvisor_core = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", default-features = false }
-axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", default-features = false }
+axvisor_core = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
+axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
 axvisor-linux-conformance = { path = "../axvisor-linux-conformance", optional = true }
-ax-percpu = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", features = ["custom-base", "external-base"] }
+ax-percpu = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", features = ["custom-base", "external-base"] }
 log = "0.4"
+arm_vcpu = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", optional = true }

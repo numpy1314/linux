@@ -10,9 +10,10 @@ crate-type = ["rlib"]
 [features]
 default = []
 control = ["axvisor_api/control"]
+arm-vhe = ["axvisor_api/arm-vhe"]
 shell = ["axvisor_api/shell"]
 
 [dependencies]
-axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d", default-features = false }
-ax-errno = { git = "https://github.com/numpy1314/tgoskits", rev = "78c84a4349649be2f7cb39328e0e3293a959a04d" }
+axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
+ax-errno = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc" }
 spin = "0.12"

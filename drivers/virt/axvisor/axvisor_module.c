@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
+#include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/kthread.h>
@@ -16,6 +17,9 @@ MODULE_PARM_DESC(control,
 static int axvisor_linux_core_thread(void *unused)
 {
 	(void)unused;
+#ifdef CONFIG_AXVISOR_ARM64_VHE_SELFTEST
+	return axvisor_linux_vhe_selftest();
+#endif
 #ifdef CONFIG_AXVISOR_LINUX_CONFORMANCE
 	if (axvisor_linux_conformance_enabled())
 		return axvisor_linux_conformance_run();
@@ -37,6 +41,13 @@ static int __init axvisor_linux_init(void)
 	struct task_struct *task;
 	int ret;
 
+#ifdef CONFIG_ARM64
+	ret = axvisor_linux_arm64_vhe_enabled() ? axvisor_linux_vhe_prepare() : -EOPNOTSUPP;
+	if (ret) {
+		pr_err("axvisor-linux: VHE runtime admission refused (%d)\n", ret);
+		return ret;
+	}
+#endif
 	ret = axvisor_linux_console_register_endpoint();
 	if (ret) {
 		pr_err("axvisor-linux: failed to register console input (%d)\n",

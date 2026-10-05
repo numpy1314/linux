@@ -55,6 +55,9 @@
 #define HYPERVISOR_PERCPU_SECTION
 #define HYPERVISOR_RELOC_SECTION
 #define SBSS_ALIGN			0
+#ifdef CONFIG_AXVISOR_LINUX_BRIDGE
+#define BSS_FIRST_SECTIONS *(.bss._R* .bss._ZN*)
+#endif
 #endif
 
 #define RO_EXCEPTION_TABLE_ALIGN	4
@@ -176,6 +179,9 @@ SECTIONS
 			SOFTIRQENTRY_TEXT
 			ENTRY_TEXT
 			TEXT_TEXT
+#ifdef CONFIG_AXVISOR_LINUX_BRIDGE
+			*(.text.*)
+#endif
 			SCHED_TEXT
 			LOCK_TEXT
 			KPROBES_TEXT
@@ -188,6 +194,16 @@ SECTIONS
 
 	/* everything from this point to __init_begin will be marked RO NX */
 	RO_DATA(PAGE_SIZE)
+
+#ifdef CONFIG_AXVISOR_LINUX_BRIDGE
+	.axvisor_percpu : ALIGN(64) {
+		_percpu_load_start = .;
+		KEEP(*(.percpu))
+		_percpu_load_end = .;
+	}
+	_ex_table_start = __start___ex_table;
+	_ex_table_end = __stop___ex_table;
+#endif
 
 	HYPERVISOR_DATA_SECTIONS
 
@@ -290,6 +306,10 @@ SECTIONS
 	_data = .;
 	_sdata = .;
 	RW_DATA(L1_CACHE_BYTES, PAGE_SIZE, THREAD_ALIGN)
+#ifdef CONFIG_AXVISOR_LINUX_BRIDGE
+	.axvisor_data : { *(.data._R* .data._ZN*) }
+	/DISCARD/ : { *(.eh_frame .eh_frame_hdr) }
+#endif
 
 	/*
 	 * Data written with the MMU off but read with the MMU on requires

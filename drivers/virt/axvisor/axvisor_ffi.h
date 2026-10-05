@@ -4,7 +4,12 @@
 
 #include <linux/types.h>
 
+int axvisor_linux_vhe_prepare(void);
+bool axvisor_linux_arm64_vhe_enabled(void);
 void axvisor_linux_core_boot(void) __noreturn;
+#ifdef CONFIG_AXVISOR_ARM64_VHE_SELFTEST
+int axvisor_linux_vhe_selftest(void);
+#endif
 #ifdef CONFIG_AXVISOR_LINUX_CONFORMANCE
 bool axvisor_linux_conformance_enabled(void);
 int axvisor_linux_conformance_run(void);
@@ -16,6 +21,8 @@ void axvisor_linux_log_message(const u8 *message, size_t length);
 size_t axvisor_linux_host_get_cpu_num(void);
 size_t axvisor_linux_host_current_cpu(void);
 int axvisor_linux_percpu_prepare(void);
+void *_percpu_base_ptr(unsigned long cpu);
+unsigned long ax_percpu_current_base(void);
 void axvisor_linux_host_init_percpu(void);
 void axvisor_linux_console_write_bytes(const u8 *bytes, size_t length);
 void axvisor_linux_console_enqueue_bytes(const u8 *bytes, size_t length);
@@ -28,6 +35,7 @@ u64 axvisor_linux_control_open(void);
 int axvisor_linux_control_close(u64 control_file);
 long axvisor_linux_control_ioctl(u64 control_file, u32 cmd, unsigned long arg);
 int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area);
+int axvisor_linux_control_create_fd_at(u64 control_file, int __user *result);
 int axvisor_linux_control_copy_from_user(void *dst, const void __user *src,
 						 size_t length);
 int axvisor_linux_control_copy_to_user(void __user *dst, const void *src,
@@ -56,6 +64,11 @@ u64 axvisor_linux_time_current_time_nanos(void);
 void axvisor_linux_time_set_oneshot_timer(u64 deadline_nanos);
 unsigned long axvisor_linux_arch_host_fdt_paddr(void);
 void axvisor_linux_arch_capture_host_fdt(void);
+#ifdef CONFIG_ARM64
+unsigned long axvisor_linux_arm64_gic_info(unsigned int which);
+long axvisor_linux_vhe_enter(void);
+void axvisor_linux_vhe_exit(unsigned long token);
+#endif
 void axvisor_linux_arch_remote_hfence_vvma_all(void);
 unsigned int axvisor_linux_arch_host_tsc_frequency_mhz(void);
 void *axvisor_linux_alloc(size_t size, size_t align);
