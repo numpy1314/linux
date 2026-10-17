@@ -3,6 +3,7 @@
 #include <linux/timekeeping.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/overflow.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
 #include <linux/memory_hotplug.h>
@@ -33,8 +34,10 @@
 #include <linux/anon_inodes.h>
 #include <linux/sched/signal.h>
 #endif
-#ifdef CONFIG_RISCV
 #include <asm/pgtable.h>
+#ifdef CONFIG_ARM64
+#include <asm/ptrace.h>
+#include <asm/sysreg.h>
 #endif
 #ifdef CONFIG_X86
 #include <asm/tsc.h>
@@ -422,7 +425,8 @@ u64 axvisor_linux_control_pin_user_pages(u64 mm_id, unsigned long addr,
 	pinned = kzalloc(sizeof(*pinned), GFP_KERNEL);
 	if (!pinned)
 		return 0;
-	pinned->pages = kcalloc(npages, sizeof(*pinned->pages), GFP_KERNEL);
+	/* This array stores page pointers, not physically contiguous RAM. */
+	pinned->pages = kvcalloc(npages, sizeof(*pinned->pages), GFP_KERNEL);
 	if (!pinned->pages) {
 		kfree(pinned);
 		return 0;
@@ -461,7 +465,7 @@ u64 axvisor_linux_control_pin_user_pages(u64 mm_id, unsigned long addr,
 	if (ret != npages) {
 		if (ret > 0)
 			unpin_user_pages(pinned->pages, ret);
-		kfree(pinned->pages);
+		axvisor_linux_dealloc(pinned->pages);
 		kfree(pinned);
 		return 0;
 	}
@@ -488,7 +492,7 @@ int axvisor_linux_control_release_pinned_pages(u64 id)
 		for (i = 0; i < pinned->count; i++)
 			put_page(pinned->pages[i]);
 	}
-	kfree(pinned->pages);
+	axvisor_linux_dealloc(pinned->pages);
 	kfree(pinned);
 	return 0;
 }
@@ -847,21 +851,70 @@ unsigned int axvisor_linux_arch_host_tsc_frequency_mhz(void)
 #endif
 }
 
+/* Ordinary Rust heap storage has a virtual-contiguity contract. Physical
+ * frames and hardware-facing memory use the separate MemoryIf callbacks.
+ * Like the Linux slab/vmalloc APIs, these heap callbacks are not NMI-safe.
+ */
+static bool axvisor_linux_heap_atomic(void)
+{
+#ifdef CONFIG_ARM64
+	/* Rust SpinNoIrq masks DAIF.I directly. With GIC priority masking,
+	 * Linux irqs_disabled() can instead inspect PMR and miss this state.
+	 */
+	if (read_sysreg(daif) & PSR_I_BIT)
+		return true;
+#endif
+	return irqs_disabled() || in_atomic();
+}
+
 void *axvisor_linux_alloc(size_t size, size_t align)
 {
-	gfp_t flags = irqs_disabled() ? GFP_ATOMIC : GFP_KERNEL;
-	/* kmalloc alignment is at least ARCH_KMALLOC_MINALIGN; over-aligned
-	 * allocations are conservatively rounded up to the requested boundary. */
+	bool atomic = axvisor_linux_heap_atomic();
+	size_t rounded;
+
+	if (!align || !is_power_of_2(align))
+		return NULL;
 	if (!size)
 		size = 1;
-	if (align > 1)
-		size = ALIGN(size, align);
-	return kmalloc(size, flags);
+	if (check_add_overflow(size, align - 1, &rounded))
+		return NULL;
+	rounded &= ~(align - 1);
+
+	/* Small objects stay in the direct map. Atomic callers cannot create
+	 * vmalloc mappings, so retain kmalloc's non-sleeping allocation path.
+	 * Rounding the size to a multiple of align supplies kmalloc alignment.
+	 */
+	if (rounded <= PAGE_SIZE || atomic) {
+		if (rounded > KMALLOC_MAX_SIZE)
+			return NULL;
+		return kmalloc(rounded, atomic ? GFP_ATOMIC : GFP_KERNEL);
+	}
+
+	/* Avoid high-order physical allocations for large metadata, including
+	 * the 4 MiB + Arc header needed for a 2 GiB memory slot. The range API
+	 * also honors Rust Layout alignments larger than PAGE_SIZE.
+	 */
+	if (size > SIZE_MAX - (PAGE_SIZE - 1))
+		return NULL;
+	return __vmalloc_node_range(size, max_t(size_t, align, PAGE_SIZE),
+				    VMALLOC_START, VMALLOC_END, GFP_KERNEL,
+				    PAGE_KERNEL, 0, NUMA_NO_NODE,
+				    __builtin_return_address(0));
 }
 
 void axvisor_linux_dealloc(void *ptr)
 {
-	kfree(ptr);
+	if (!is_vmalloc_addr(ptr)) {
+		kfree(ptr);
+		return;
+	}
+	/* Final Arc drops can occur under Rust SpinNoIrq in process context.
+	 * vfree() alone checks interrupt context, not every such atomic caller.
+	 */
+	if (axvisor_linux_heap_atomic())
+		vfree_atomic(ptr);
+	else
+		vfree(ptr);
 }
 
 struct axvisor_io_map {

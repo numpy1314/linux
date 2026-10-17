@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/overflow.h>
+#include <linux/sched.h>
+#include <linux/cpumask.h>
+#include <linux/interrupt.h>
+#include <linux/preempt.h>
+#include <linux/reboot.h>
+#include <linux/delay.h>
+#include <asm/pgtable.h>
+#ifdef CONFIG_ARM64
+#include <asm/ptrace.h>
+#include <asm/sysreg.h>
+#endif
+
+void *axvisor_linux_alloc(size_t size, size_t align);
+void axvisor_linux_dealloc(void *ptr);
+
+/* EXTRACTED_ADAPTER_ALLOCATOR */
+
+static bool legacy;
+static int checks, failures;
+
+static int __init fh_mode(char *s)
+{
+	legacy = s && !strcmp(s, "legacy");
+	return 0;
+}
+early_param("fhtest", fh_mode);
+
+#define FH_CHECK(condition, name) do { \
+	checks++; \
+	if (!(condition)) { \
+		failures++; \
+		pr_err("FH_TEST FAIL %s\n", name); \
+	} else { \
+		pr_info("FH_TEST PASS %s\n", name); \
+	} \
+} while (0)
+
+/* Read every byte back; the pattern also varies between physical pages. */
+static bool verify_buffer(unsigned char *p, size_t size)
+{
+	size_t i;
+
+	for (i = 0; i < size; i++)
+		WRITE_ONCE(p[i], (unsigned char)(i ^ (i >> 8) ^ (i >> 16)));
+	for (i = 0; i < size; i++)
+		if (READ_ONCE(p[i]) != (unsigned char)(i ^ (i >> 8) ^ (i >> 16)))
+			return false;
+	return true;
+}
+
+static void test_alloc(size_t size, size_t align, bool expect_vmalloc)
+{
+	unsigned char *p = axvisor_linux_alloc(size, align);
+	char name[100];
+
+	snprintf(name, sizeof(name), "alloc_size_%zu_align_%zu", size, align);
+	FH_CHECK(p && IS_ALIGNED((unsigned long)p, align), name);
+	if (!p)
+		return;
+	snprintf(name, sizeof(name), "backing_size_%zu_align_%zu", size, align);
+	FH_CHECK(is_vmalloc_addr(p) == expect_vmalloc, name);
+	snprintf(name, sizeof(name), "full_buffer_integrity_size_%zu_align_%zu", size, align);
+	FH_CHECK(verify_buffer(p, size ? size : 1), name);
+	axvisor_linux_dealloc(p);
+}
+
+static void test_pinned_array(bool atomic_free)
+{
+	/* One page above a 2 GiB slot crosses the 4 MiB kmalloc boundary. */
+	const size_t count = 524289;
+	const size_t size = count * sizeof(void *);
+	unsigned char *p = kvcalloc(count, sizeof(void *), GFP_KERNEL);
+	unsigned long flags;
+
+	FH_CHECK(p != NULL, atomic_free ? "pinned_array_atomic_prepare" : "pinned_array_normal_prepare");
+	if (!p)
+		return;
+	FH_CHECK(is_vmalloc_addr(p), "pinned_array_4MiB_plus8_vmalloc");
+	FH_CHECK(!memchr_inv(p, 0, size), "pinned_array_zero_initialized");
+	FH_CHECK(verify_buffer(p, size), "pinned_array_full_buffer_integrity");
+	if (atomic_free) {
+		local_irq_save(flags);
+		axvisor_linux_dealloc(p);
+		local_irq_restore(flags);
+	} else {
+		axvisor_linux_dealloc(p);
+	}
+	FH_CHECK(true, atomic_free ? "pinned_array_atomic_free_returned" : "pinned_array_normal_free_returned");
+}
+
+static void test_irqoff(void)
+{
+	unsigned long flags;
+	void *p = axvisor_linux_alloc(4194320, 8), *small, *large;
+	bool detected;
+
+	FH_CHECK(p != NULL, "prepare_irqoff_free");
+	local_irq_save(flags);
+	detected = axvisor_linux_heap_atomic();
+	small = axvisor_linux_alloc(128, 128);
+	large = axvisor_linux_alloc(4194320, 8);
+	axvisor_linux_dealloc(p);
+	axvisor_linux_dealloc(small);
+	local_irq_restore(flags);
+	FH_CHECK(detected, "irqoff_context_detected");
+	FH_CHECK(small != NULL, "irqoff_small_alloc");
+	FH_CHECK(large == NULL, "irqoff_oversize_rejected_without_warning");
+	axvisor_linux_dealloc(large);
+}
+
+static void test_preempt_disabled(void)
+{
+#ifdef CONFIG_PREEMPT_COUNT
+	void *p = axvisor_linux_alloc(4194320, 8), *small, *large;
+	bool detected, irqoff, task_context;
+
+	FH_CHECK(p != NULL, "prepare_preempt_disabled_free");
+	preempt_disable();
+	detected = axvisor_linux_heap_atomic();
+	irqoff = irqs_disabled();
+	task_context = in_task();
+	small = axvisor_linux_alloc(128, 128);
+	large = axvisor_linux_alloc(4194320, 8);
+	axvisor_linux_dealloc(p);
+	axvisor_linux_dealloc(small);
+	preempt_enable();
+	FH_CHECK(!irqoff && task_context, "preempt_disabled_is_process_context_with_irqs_enabled");
+	FH_CHECK(detected, "preempt_disabled_context_detected");
+	FH_CHECK(small != NULL, "preempt_disabled_small_alloc");
+	FH_CHECK(large == NULL, "preempt_disabled_oversize_rejected_without_warning");
+	axvisor_linux_dealloc(large);
+#else
+	pr_info("FH_TEST SKIP preempt_disabled CONFIG_PREEMPT_COUNT=n\n");
+#endif
+}
+
+static void test_raw_daif(void)
+{
+#ifdef CONFIG_ARM64
+	unsigned long daif;
+	void *p = axvisor_linux_alloc(8388608, 65536), *large;
+	bool detected, linux_irqoff;
+
+	FH_CHECK(p != NULL, "prepare_raw_daif_free");
+	daif = read_sysreg(daif);
+	asm volatile("msr daifset, #2" ::: "memory");
+	detected = axvisor_linux_heap_atomic();
+	linux_irqoff = irqs_disabled();
+	large = axvisor_linux_alloc(4194320, 8);
+	axvisor_linux_dealloc(p);
+	asm volatile("msr daif, %0" :: "r"(daif) : "memory");
+	pr_info("FH_TEST RAW_DAIF linux_irqs_disabled=%d bridge_atomic=%d\n", linux_irqoff, detected);
+	FH_CHECK(detected, "raw_daif_context_detected");
+	FH_CHECK(large == NULL, "raw_daif_oversize_rejected_without_warning");
+	axvisor_linux_dealloc(large);
+#else
+	pr_info("FH_TEST SKIP raw_daif architecture_is_not_arm64\n");
+#endif
+}
+
+static int __init fh_test_init(void)
+{
+	void *p;
+	int pin_rc = set_cpus_allowed_ptr(current, cpumask_of(4));
+
+	pr_info("FH_TEST START mode=%s cpu=%u pin_rc=%d page_shift=%u max_page_order=%u preempt_voluntary=%d preempt_count=%d debug_atomic_sleep=%d cpus=%u\n",
+		legacy ? "legacy" : "fixed", raw_smp_processor_id(), pin_rc,
+		PAGE_SHIFT, MAX_PAGE_ORDER, IS_ENABLED(CONFIG_PREEMPT_VOLUNTARY),
+		IS_ENABLED(CONFIG_PREEMPT_COUNT), IS_ENABLED(CONFIG_DEBUG_ATOMIC_SLEEP), num_online_cpus());
+	FH_CHECK(!pin_rc && raw_smp_processor_id() == 4, "cpu4_affinity");
+	FH_CHECK(PAGE_SHIFT == 12 && MAX_PAGE_ORDER == 10 &&
+		 IS_ENABLED(CONFIG_PREEMPT_VOLUNTARY) && num_online_cpus() == 8, "board_key_config");
+	if (legacy) {
+		/* Original bridge path; stop at NULL instead of reproducing its panic spin. */
+		p = kmalloc(ALIGN((size_t)4194320, 8), GFP_KERNEL);
+		FH_CHECK(!p, "legacy_4MiB_plus16_rejected");
+		kfree(p);
+	} else {
+		FH_CHECK(!axvisor_linux_heap_atomic(), "normal_context_sleepable");
+		test_alloc(0, 8, false);
+		test_alloc(1, 1, false);
+		test_alloc(128, 128, false);
+		test_alloc(4096, 4096, false);
+		test_alloc(4194320, 8, true);
+		test_alloc(8388608, 8, true);
+		test_alloc(4194320, 4096, true);
+		test_alloc(8388608, 65536, true);
+		test_alloc(1, 65536, true);
+		FH_CHECK(!axvisor_linux_alloc(1, 0), "zero_alignment_rejected");
+		FH_CHECK(!axvisor_linux_alloc(1, 3), "nonpower_alignment_rejected");
+		FH_CHECK(!axvisor_linux_alloc(SIZE_MAX, 8), "size_alignment_overflow_rejected");
+		FH_CHECK(!axvisor_linux_alloc(SIZE_MAX, 1), "page_rounding_overflow_rejected");
+		axvisor_linux_dealloc(NULL);
+		p = kvcalloc(524288, sizeof(void *), GFP_KERNEL);
+		FH_CHECK(p != NULL, "pinned_pages_kvcalloc_2GiB_guest");
+		axvisor_linux_dealloc(p);
+		test_pinned_array(false);
+		test_pinned_array(true);
+		test_irqoff();
+		test_preempt_disabled();
+		test_raw_daif();
+		msleep(200);
+		test_alloc(4194320, 8, true);
+	}
+	pr_info("FH_TEST RESULT mode=%s checks=%d failures=%d\n", legacy ? "legacy" : "fixed", checks, failures);
+	kernel_power_off();
+	return failures ? -EINVAL : 0;
+}
+late_initcall_sync(fh_test_init);
