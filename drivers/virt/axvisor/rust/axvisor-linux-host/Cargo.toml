@@ -14,6 +14,6 @@ arm-vhe = ["axvisor_api/arm-vhe"]
 shell = ["axvisor_api/shell"]
 
 [dependencies]
-axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
-ax-errno = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc" }
+axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "8ff79f83f90d2baed2906f5a821b92418c144dce", default-features = false }
+ax-errno = { git = "https://github.com/numpy1314/tgoskits", rev = "8ff79f83f90d2baed2906f5a821b92418c144dce" }
 spin = "0.12"

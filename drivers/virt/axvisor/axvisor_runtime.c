@@ -33,6 +33,8 @@
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
 #include <linux/sched/signal.h>
+#include <linux/poll.h>
+#include <linux/uio.h>
 #endif
 #include <asm/pgtable.h>
 #ifdef CONFIG_ARM64
@@ -107,6 +109,13 @@ struct axvisor_linux_control_fd_ref {
 	struct file *file;
 #ifdef CONFIG_EVENTFD
 	struct eventfd_ctx *eventfd;
+#ifdef CONFIG_AXVISOR_ARM64_VHE
+	wait_queue_head_t readable_wait;
+	wait_queue_entry_t event_wait;
+	poll_table poll_table;
+	wait_queue_head_t *event_wqh;
+	bool wait_cancelled;
+#endif
 #endif
 };
 extern long axvisor_linux_control_ioctl(u64 control_file, u32 cmd,
@@ -302,6 +311,34 @@ int axvisor_linux_control_release_mmap_area(u64 area)
 	return 0;
 }
 
+#if defined(CONFIG_AXVISOR_ARM64_VHE) && defined(CONFIG_EVENTFD)
+static int axvisor_linux_control_event_wake(wait_queue_entry_t *wait,
+					  unsigned int mode, int sync, void *key)
+{
+	struct axvisor_linux_control_fd_ref *ref =
+		container_of(wait, struct axvisor_linux_control_fd_ref, event_wait);
+	__poll_t events = key_to_poll(key);
+
+	/* Called under the eventfd waitqueue lock. Only notify the listener;
+	 * consuming the counter and injecting a guest IRQ stay in task context.
+	 */
+	if (!key || (events & (EPOLLIN | EPOLLERR | EPOLLHUP)))
+		wake_up_all(&ref->readable_wait);
+	return 0;
+}
+
+static void axvisor_linux_control_event_poll(struct file *file,
+					    wait_queue_head_t *wqh, poll_table *pt)
+{
+	struct axvisor_linux_control_fd_ref *ref =
+		container_of(pt, struct axvisor_linux_control_fd_ref, poll_table);
+
+	/* Only eventfd files reach this callback; they have one waitqueue. */
+	ref->event_wqh = wqh;
+	add_wait_queue(wqh, &ref->event_wait);
+}
+#endif
+
 u64 axvisor_linux_control_get_fd_ref(int fd)
 {
 	struct axvisor_linux_control_fd_ref *ref;
@@ -320,6 +357,11 @@ u64 axvisor_linux_control_get_fd_ref(int fd)
 	ref->eventfd = eventfd_ctx_fileget(ref->file);
 	if (IS_ERR(ref->eventfd))
 		ref->eventfd = NULL;
+#ifdef CONFIG_AXVISOR_ARM64_VHE
+	init_waitqueue_head(&ref->readable_wait);
+	init_waitqueue_func_entry(&ref->event_wait, axvisor_linux_control_event_wake);
+	init_poll_funcptr(&ref->poll_table, axvisor_linux_control_event_poll);
+#endif
 #endif
 	return (u64)(uintptr_t)ref;
 }
@@ -360,8 +402,95 @@ ssize_t axvisor_linux_control_read_fd_ref(u64 id, void *buf, size_t length)
 
 	if (!ref || !ref->file || !buf)
 		return -EBADF;
+#if defined(CONFIG_AXVISOR_ARM64_VHE) && defined(CONFIG_EVENTFD)
+	if (ref->eventfd) {
+		struct kiocb iocb;
+		struct iov_iter iter;
+		struct kvec iov = { .iov_base = buf, .iov_len = length };
+
+		/* The ControlIf read contract is nonblocking even if userspace
+		 * created a blocking eventfd. Never change shared file->f_flags.
+		 */
+		init_sync_kiocb(&iocb, ref->file);
+		iocb.ki_flags |= IOCB_NOWAIT;
+		iov_iter_kvec(&iter, ITER_DEST, &iov, 1, length);
+		return vfs_iocb_iter_read(ref->file, &iocb, &iter);
+	}
+#endif
 	return kernel_read(ref->file, buf, length, &pos);
 }
+
+#ifdef CONFIG_AXVISOR_ARM64_VHE
+int axvisor_linux_control_wait_fd_readable(u64 id)
+{
+	struct axvisor_linux_control_fd_ref *ref =
+		(struct axvisor_linux_control_fd_ref *)(uintptr_t)id;
+#ifdef CONFIG_EVENTFD
+	__poll_t events;
+	int ret;
+#endif
+
+	if (!ref || !ref->file)
+		return -EBADF;
+#ifdef CONFIG_EVENTFD
+	if (!ref->eventfd)
+		return -EOPNOTSUPP;
+	/* This host runtime boundary rejects Core calls with IRQs or preemption
+	 * disabled. Core can mask DAIF directly, outside Linux IRQ tracing.
+	 */
+	if ((read_sysreg(daif) & PSR_I_BIT) || irqs_disabled() || in_atomic())
+		return -EWOULDBLOCK;
+
+	/* One listener per retained reference. Subscribe lazily: write-only
+	 * ioeventfd references do not need a callback on their eventfd queue.
+	 */
+	if (!ref->event_wqh)
+		vfs_poll(ref->file, &ref->poll_table);
+	for (;;) {
+		if (READ_ONCE(ref->wait_cancelled))
+			return -ECANCELED;
+		events = vfs_poll(ref->file, NULL);
+		if (events & EPOLLIN)
+			return 0;
+		if (events & (EPOLLERR | EPOLLHUP))
+			return -EIO;
+		/* Recheck readiness after enqueueing, as required by wait_event.
+		 * eventfd's poll with a NULL table only reads the counter: it does
+		 * not subscribe again or acquire the eventfd queue lock. The wake
+		 * callback takes readable_wait's lock after publishing the count.
+		 */
+		ret = wait_event_interruptible(ref->readable_wait,
+			READ_ONCE(ref->wait_cancelled) ||
+			(vfs_poll(ref->file, NULL) & (EPOLLIN | EPOLLERR | EPOLLHUP)));
+		if (ret)
+			return -EINTR;
+	}
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+int axvisor_linux_control_cancel_fd_wait(u64 id)
+{
+	struct axvisor_linux_control_fd_ref *ref =
+		(struct axvisor_linux_control_fd_ref *)(uintptr_t)id;
+
+	if (!ref || !ref->file)
+		return -EBADF;
+#ifdef CONFIG_EVENTFD
+	if (!ref->eventfd)
+		return -EOPNOTSUPP;
+	/* Cancellation belongs to this reference, not to the shared counter.
+	 * It also covers cancellation before the listener first subscribes.
+	 */
+	WRITE_ONCE(ref->wait_cancelled, true);
+	wake_up_all(&ref->readable_wait);
+	return 0;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+#endif
 
 int axvisor_linux_control_release_fd_ref(u64 id)
 {
@@ -371,6 +500,14 @@ int axvisor_linux_control_release_fd_ref(u64 id)
 	if (!ref)
 		return -EINVAL;
 #ifdef CONFIG_EVENTFD
+#ifdef CONFIG_AXVISOR_ARM64_VHE
+	/* Core has joined the listener. Taking the eventfd queue lock also
+	 * synchronizes with callbacks before the reference can be freed.
+	 * Do not use eventfd_ctx_remove_wait_queue(): it drains the counter.
+	 */
+	if (ref->event_wqh)
+		remove_wait_queue(ref->event_wqh, &ref->event_wait);
+#endif
 	if (ref->eventfd)
 		eventfd_ctx_put(ref->eventfd);
 #endif
