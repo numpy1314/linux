@@ -1,0 +1,268 @@
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/atomic.h>
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/eventfd.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/kthread.h>
+#include <linux/poll.h>
+#include <linux/reboot.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/uio.h>
+#ifdef CONFIG_ARM64
+#include <asm/ptrace.h>
+#include <asm/sysreg.h>
+/* Enable exactly the production ARM path without linking the hypervisor. */
+#define CONFIG_AXVISOR_ARM64_VHE 1
+#endif
+
+u64 axvisor_linux_control_get_fd_ref(int fd);
+ssize_t axvisor_linux_control_read_fd_ref(u64 id, void *buf, size_t length);
+ssize_t axvisor_linux_control_write_fd_ref(u64 id, const void *buf, size_t length);
+int axvisor_linux_control_release_fd_ref(u64 id);
+#ifdef CONFIG_ARM64
+int axvisor_linux_control_wait_fd_readable(u64 id);
+int axvisor_linux_control_cancel_fd_wait(u64 id);
+#endif
+
+/* EXTRACTED_FD_CALLBACKS */
+
+extern int fh_irqfd_test_create(unsigned int count, int flags);
+static unsigned int checks, failures;
+
+static void check(bool condition, const char *name)
+{
+	checks++;
+	if (!condition) {
+		failures++;
+		pr_err("FH_IRQFD FAIL %s\n", name);
+	}
+}
+
+static u64 new_ref(unsigned int count, int flags, int *fd)
+{
+	u64 id;
+
+	*fd = fh_irqfd_test_create(count, flags);
+	if (*fd < 0)
+		panic("FH_IRQFD eventfd creation failed: %d", *fd);
+	id = axvisor_linux_control_get_fd_ref(*fd);
+	if (!id)
+		panic("FH_IRQFD fd retention failed");
+	return id;
+}
+
+static void drop_ref(u64 id, int fd)
+{
+	check(!axvisor_linux_control_release_fd_ref(id), "release reference");
+	check(!close_fd(fd), "close descriptor");
+}
+
+static void test_reads(void)
+{
+	u64 value = 0, id;
+	int fd;
+	struct file *file;
+
+	id = new_ref(0, EFD_NONBLOCK, &fd);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == -EAGAIN,
+	      "empty nonblocking read");
+	value = 1;
+	check(axvisor_linux_control_write_fd_ref(id, &value, 8) == 8, "signal event");
+	value = 0;
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 1,
+	      "read exact counter");
+	check(axvisor_linux_control_read_fd_ref(id, &value, 7) == -EINVAL,
+	      "short read rejected");
+	drop_ref(id, fd);
+#ifdef CONFIG_ARM64
+	id = new_ref(0, 0, &fd);
+	file = fget(fd);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == -EAGAIN,
+	      "blocking eventfd read remains nonblocking for Core");
+	check(!(file->f_flags & O_NONBLOCK), "shared file flags unchanged");
+	fput(file);
+	drop_ref(id, fd);
+#else
+	/* The unchanged x86 path is only read when its blocking fd is ready. */
+	id = new_ref(3, 0, &fd);
+	file = fget(fd);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 3,
+	      "legacy ready blocking eventfd read");
+	check(!(file->f_flags & O_NONBLOCK), "legacy shared file flags unchanged");
+	fput(file);
+	drop_ref(id, fd);
+#endif
+}
+
+#ifdef CONFIG_ARM64
+struct waiter {
+	u64 id;
+	struct completion entered, done;
+	struct task_struct *task;
+	int result, cpu;
+};
+
+static int wait_thread(void *data)
+{
+	struct waiter *wait = data;
+
+	wait->cpu = raw_smp_processor_id();
+	complete(&wait->entered);
+	wait->result = axvisor_linux_control_wait_fd_readable(wait->id);
+	complete(&wait->done);
+	return 0;
+}
+
+static void start_waiter(struct waiter *wait, u64 id)
+{
+	wait->id = id;
+	init_completion(&wait->entered);
+	init_completion(&wait->done);
+	wait->task = kthread_create(wait_thread, wait, "irqfd-test-wait");
+	if (IS_ERR(wait->task))
+		panic("FH_IRQFD waiter creation failed");
+	get_task_struct(wait->task);
+	if (num_online_cpus() > 1)
+		kthread_bind(wait->task, 1);
+	wake_up_process(wait->task);
+	if (!wait_for_completion_timeout(&wait->entered, 5 * HZ))
+		panic("FH_IRQFD waiter start timed out");
+}
+
+static void finish_waiter(struct waiter *wait, int expected)
+{
+	if (!wait_for_completion_timeout(&wait->done, 5 * HZ))
+		panic("FH_IRQFD waiter completion timed out");
+	kthread_stop(wait->task);
+	put_task_struct(wait->task);
+	check(wait->result == expected, "wait result");
+}
+
+static void test_wait_and_cancel(void)
+{
+	struct waiter wait;
+	u64 value = 1, id;
+	int fd;
+
+	id = new_ref(0, EFD_NONBLOCK, &fd);
+	start_waiter(&wait, id);
+	msleep(30);
+	check(!completion_done(&wait.done), "idle wait has not returned");
+	check(READ_ONCE(wait.task->__state) == TASK_INTERRUPTIBLE, "idle listener sleeps");
+	check(wait.cpu != raw_smp_processor_id(), "cross-CPU notification");
+	axvisor_linux_control_write_fd_ref(id, &value, 8);
+	finish_waiter(&wait, 0);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 1,
+	      "wait does not consume event");
+	start_waiter(&wait, id);
+	msleep(20);
+	check(!axvisor_linux_control_cancel_fd_wait(id), "cancel sleeping waiter");
+	finish_waiter(&wait, -ECANCELED);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == -EAGAIN,
+	      "cancel does not increment event counter");
+	check(axvisor_linux_control_wait_fd_readable(id) == -ECANCELED,
+	      "cancel is persistent");
+	drop_ref(id, fd);
+
+	id = new_ref(7, EFD_NONBLOCK, &fd);
+	check(!axvisor_linux_control_wait_fd_readable(id), "event before subscription");
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 7,
+	      "counter preserved across subscription");
+	drop_ref(id, fd);
+
+	id = new_ref(2, EFD_NONBLOCK | EFD_SEMAPHORE, &fd);
+	check(!axvisor_linux_control_cancel_fd_wait(id), "cancel before subscription");
+	start_waiter(&wait, id);
+	finish_waiter(&wait, -ECANCELED);
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 1,
+	      "semaphore counter preserved first read");
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8 && value == 1,
+	      "semaphore counter preserved second read");
+	check(axvisor_linux_control_read_fd_ref(id, &value, 8) == -EAGAIN,
+	      "no synthetic semaphore event on cancel");
+	drop_ref(id, fd);
+}
+
+static int signal_thread(void *data)
+{
+	struct eventfd_ctx *ctx = data;
+
+	while (!kthread_should_stop()) {
+		eventfd_signal(ctx);
+		cond_resched();
+	}
+	return 0;
+}
+
+static void test_races(void)
+{
+	struct waiter wait;
+	struct task_struct *writer;
+	struct eventfd_ctx *ctx;
+	u64 value = 1, id, other;
+	unsigned int i;
+	int fd;
+
+	for (i = 0; i < 128; i++) {
+		id = new_ref(0, EFD_NONBLOCK, &fd);
+		start_waiter(&wait, id);
+		if (i & 1) {
+			axvisor_linux_control_write_fd_ref(id, &value, 8);
+			finish_waiter(&wait, 0);
+			check(axvisor_linux_control_read_fd_ref(id, &value, 8) == 8,
+			      "registration race retains event");
+		} else {
+			axvisor_linux_control_cancel_fd_wait(id);
+			finish_waiter(&wait, -ECANCELED);
+		}
+		drop_ref(id, fd);
+	}
+	/* Retained references to one file must have independent cancellation. */
+	id = new_ref(0, EFD_NONBLOCK, &fd);
+	other = axvisor_linux_control_get_fd_ref(fd);
+	start_waiter(&wait, other);
+	axvisor_linux_control_cancel_fd_wait(id);
+	axvisor_linux_control_write_fd_ref(id, &value, 8);
+	finish_waiter(&wait, 0);
+	axvisor_linux_control_release_fd_ref(other);
+	drop_ref(id, fd);
+
+	/* Repeatedly detach while an independent writer invokes callbacks. */
+	id = new_ref(1, EFD_NONBLOCK, &fd);
+	ctx = eventfd_ctx_fdget(fd);
+	if (IS_ERR(ctx))
+		panic("FH_IRQFD writer context acquisition failed");
+	writer = kthread_run(signal_thread, ctx, "irqfd-test-signal");
+	if (IS_ERR(writer))
+		panic("FH_IRQFD writer creation failed");
+	for (i = 0; i < 256; i++) {
+		other = axvisor_linux_control_get_fd_ref(fd);
+		check(!axvisor_linux_control_wait_fd_readable(other), "concurrent readiness");
+		check(!axvisor_linux_control_release_fd_ref(other), "concurrent detach");
+		cond_resched();
+	}
+	kthread_stop(writer);
+	eventfd_ctx_put(ctx);
+	drop_ref(id, fd);
+}
+#endif
+
+static int __init fh_irqfd_test(void)
+{
+	set_cpus_allowed_ptr(current, cpumask_of(0));
+	pr_info("FH_IRQFD BEGIN\n");
+	test_reads();
+#ifdef CONFIG_ARM64
+	test_wait_and_cancel();
+	test_races();
+#endif
+	pr_info("FH_IRQFD DONE checks=%u failures=%u\n", checks, failures);
+	kernel_power_off();
+	return 0;
+}
+late_initcall(fh_irqfd_test);
