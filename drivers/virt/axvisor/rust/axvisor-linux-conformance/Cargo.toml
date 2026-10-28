@@ -8,6 +8,6 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
-axvisor_conformance = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc" }
-axvisor_core = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
+axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
+axvisor_conformance = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc" }
+axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }

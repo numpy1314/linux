@@ -44,7 +44,7 @@ impl axvisor_conformance::Stimulus for LinuxStimulus {
         Some(FIRED.load(Ordering::Acquire))
     }
 
-    fn verify_physical_irq(&self, test_vector: usize) -> Option<bool> {
+    fn verify_irq_ingress(&self, test_vector: usize) -> Option<bool> {
         Some(unsafe { axvisor_linux_conformance_trigger_irq(test_vector) })
     }
 }

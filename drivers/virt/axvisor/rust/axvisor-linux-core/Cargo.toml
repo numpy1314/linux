@@ -3,6 +3,7 @@ name = "axvisor-linux-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+build = "../check-core-baseline.rs"
 
 [lib]
 crate-type = ["staticlib"]
@@ -10,8 +11,10 @@ crate-type = ["staticlib"]
 [features]
 default = []
 control = ["axvisor_api/control", "axvisor_core/control"]
-arm-vhe = ["axvisor_api/arm-vhe", "axvisor_core/arm-vhe"]
-vhe-selftest = ["arm-vhe", "dep:arm_vcpu", "arm_vcpu/vhe-selftest"]
+# Keep dependency resolution valid for the unchanged x86 Core. The build
+# script diagnoses the outstanding Linux ARM ownership-boundary integration.
+arm-vhe = []
+vhe-selftest = ["arm-vhe", "dep:arm_vcpu"]
 shell = ["axvisor_api/shell", "axvisor_core/shell"]
 sstc = ["axvisor_core/sstc"]
 svm = ["axvisor_core/svm"]
@@ -19,9 +22,9 @@ vmx = ["axvisor_core/vmx"]
 conformance-test = ["dep:axvisor-linux-conformance"]
 
 [dependencies]
-axvisor_core = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
-axvisor_api = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", default-features = false }
+axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
+axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
 axvisor-linux-conformance = { path = "../axvisor-linux-conformance", optional = true }
-ax-percpu = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", features = ["custom-base", "external-base"] }
+ax-percpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", features = ["custom-base", "external-base"] }
 log = "0.4"
-arm_vcpu = { git = "https://github.com/numpy1314/tgoskits", rev = "a02309312efcc229f9891e0f73c45422d442f7fc", optional = true }
+arm_vcpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", optional = true }

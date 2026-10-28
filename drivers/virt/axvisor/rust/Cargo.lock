@@ -33,7 +33,7 @@ dependencies = [
 [[package]]
 name = "aarch64_sysreg"
 version = "0.3.7"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 
 [[package]]
 name = "ahash"
@@ -60,26 +60,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arm_vcpu"
-version = "0.5.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+name = "arm-gic-driver"
+version = "0.17.1"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "aarch64-cpu 11.2.0",
+ "bitflags 2.13.1",
+ "enum_dispatch",
+ "log",
+ "paste",
+ "tock-registers 0.10.1",
+]
+
+[[package]]
+name = "arm_vcpu"
+version = "0.5.9"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
+dependencies = [
+ "aarch64-cpu 11.2.0",
+ "arm-gic-driver",
  "ax-errno",
  "ax-percpu",
  "axaddrspace",
  "axdevice_base",
  "axvcpu",
  "axvisor_api",
+ "kvm-uapi",
  "log",
  "numeric-enum-macro",
  "spin",
+ "tock-registers 0.10.1",
 ]
 
 [[package]]
 name = "arm_vgic"
 version = "0.4.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "aarch64-cpu 11.2.0",
  "aarch64_sysreg",
@@ -110,7 +126,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax-cpumask"
 version = "0.3.5"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "bitmaps",
 ]
@@ -118,7 +134,7 @@ dependencies = [
 [[package]]
 name = "ax-crate-interface"
 version = "0.5.7"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -128,7 +144,7 @@ dependencies = [
 [[package]]
 name = "ax-errno"
 version = "0.6.0"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "log",
  "strum",
@@ -137,7 +153,7 @@ dependencies = [
 [[package]]
 name = "ax-kernel-guard"
 version = "0.3.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-crate-interface",
  "cfg-if",
@@ -146,7 +162,7 @@ dependencies = [
 [[package]]
 name = "ax-kspin"
 version = "0.3.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-kernel-guard",
  "cfg-if",
@@ -155,17 +171,17 @@ dependencies = [
 [[package]]
 name = "ax-lazyinit"
 version = "0.4.7"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 
 [[package]]
 name = "ax-memory-addr"
 version = "0.6.8"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 
 [[package]]
 name = "ax-memory-set"
 version = "0.6.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-memory-addr",
 ]
@@ -173,7 +189,7 @@ dependencies = [
 [[package]]
 name = "ax-page-table-entry"
 version = "0.8.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "aarch64-cpu 11.2.0",
  "ax-memory-addr",
@@ -184,7 +200,7 @@ dependencies = [
 [[package]]
 name = "ax-page-table-multiarch"
 version = "0.8.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "arrayvec",
  "ax-memory-addr",
@@ -197,7 +213,7 @@ dependencies = [
 [[package]]
 name = "ax-percpu"
 version = "0.4.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-percpu-macros",
  "cfg-if",
@@ -208,7 +224,7 @@ dependencies = [
 [[package]]
 name = "ax-percpu-macros"
 version = "0.4.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "cfg-if",
  "proc-macro2",
@@ -219,12 +235,12 @@ dependencies = [
 [[package]]
 name = "ax-timer-list"
 version = "0.3.5"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 
 [[package]]
 name = "axaddrspace"
 version = "0.5.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "ax-lazyinit",
@@ -243,7 +259,7 @@ dependencies = [
 [[package]]
 name = "axdevice"
 version = "0.4.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "arm_vgic",
  "ax-errno",
@@ -251,6 +267,7 @@ dependencies = [
  "ax-memory-addr",
  "axaddrspace",
  "axdevice_base",
+ "axvisor_api",
  "axvmconfig",
  "cfg-if",
  "log",
@@ -262,7 +279,7 @@ dependencies = [
 [[package]]
 name = "axdevice_base"
 version = "0.4.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "axaddrspace",
@@ -273,7 +290,7 @@ dependencies = [
 [[package]]
 name = "axhvc"
 version = "0.4.8"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
 ]
@@ -281,7 +298,7 @@ dependencies = [
 [[package]]
 name = "axvcpu"
 version = "0.5.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "ax-kspin",
@@ -324,7 +341,7 @@ dependencies = [
 [[package]]
 name = "axvisor_api"
 version = "0.5.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-cpumask",
  "ax-crate-interface",
@@ -337,7 +354,7 @@ dependencies = [
 [[package]]
 name = "axvisor_api_proc"
 version = "0.5.7"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -348,7 +365,7 @@ dependencies = [
 [[package]]
 name = "axvisor_conformance"
 version = "0.5.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "axvisor_api",
  "log",
@@ -357,7 +374,7 @@ dependencies = [
 [[package]]
 name = "axvisor_core"
 version = "0.5.11"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "aarch64-cpu-ext",
  "anyhow",
@@ -395,7 +412,7 @@ dependencies = [
 [[package]]
 name = "axvm"
 version = "0.5.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "arm_vcpu",
  "arm_vgic",
@@ -425,7 +442,7 @@ dependencies = [
 [[package]]
 name = "axvmconfig"
 version = "0.5.2"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "enumerable",
@@ -506,6 +523,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
+name = "enum_dispatch"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "enumerable"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,7 +602,7 @@ dependencies = [
 [[package]]
 name = "kvm-uapi"
 version = "0.1.0"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "raw-cpuid 11.6.0",
 ]
@@ -606,7 +635,7 @@ dependencies = [
 [[package]]
 name = "loongarch_vcpu"
 version = "0.5.3"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "ax-kspin",
@@ -744,7 +773,7 @@ checksum = "68b59d645e392e041ad18f5e529ed13242d8405c66bb192f59703ea2137017d0"
 [[package]]
 name = "riscv-h"
 version = "0.4.7"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "bare-metal",
  "bit_field",
@@ -762,7 +791,7 @@ checksum = "d3f2ad9f15a07f4a0e1677124f9120ce7e83ab7e1ca7186af0ca9da529b62e80"
 [[package]]
 name = "riscv_vcpu"
 version = "0.5.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-crate-interface",
  "ax-errno",
@@ -789,7 +818,7 @@ dependencies = [
 [[package]]
 name = "riscv_vplic"
 version = "0.4.12"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "ax-kspin",
@@ -1058,7 +1087,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vm-interrupt"
 version = "0.1.0"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
 ]
@@ -1111,7 +1140,7 @@ dependencies = [
 [[package]]
 name = "x86_vcpu"
 version = "0.5.9"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-crate-interface",
  "ax-errno",
@@ -1138,7 +1167,7 @@ dependencies = [
 [[package]]
 name = "x86_vlapic"
 version = "0.4.10"
-source = "git+https://github.com/numpy1314/tgoskits?rev=a02309312efcc229f9891e0f73c45422d442f7fc#a02309312efcc229f9891e0f73c45422d442f7fc"
+source = "git+https://github.com/Ivans-11/tgoskits?rev=f6c897bc10582089bb5b8bb9a06a6d85b84c69dc#f6c897bc10582089bb5b8bb9a06a6d85b84c69dc"
 dependencies = [
  "ax-errno",
  "ax-kspin",
