@@ -121,10 +121,6 @@ unsafe extern "C" {
     fn axvisor_linux_control_write_fd_ref(id: u64, buf: *const u8, length: usize) -> isize;
     #[cfg(feature = "control")]
     fn axvisor_linux_control_read_fd_ref(id: u64, buf: *mut u8, length: usize) -> isize;
-    #[cfg(all(feature = "control", target_arch = "aarch64", feature = "arm-vhe"))]
-    fn axvisor_linux_control_wait_fd_readable(id: u64) -> i32;
-    #[cfg(all(feature = "control", target_arch = "aarch64", feature = "arm-vhe"))]
-    fn axvisor_linux_control_cancel_fd_wait(id: u64) -> i32;
     #[cfg(feature = "control")]
     fn axvisor_linux_control_release_fd_ref(id: u64) -> i32;
     #[cfg(feature = "control")]
@@ -523,26 +519,6 @@ impl control::ControlIf for LinuxHost {
             Err(AxError::Interrupted)
         } else {
             Err(AxError::Io)
-        }
-    }
-
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn wait_user_fd_readable(user_fd_ref: control::UserFdRefId) -> AxResult {
-        match unsafe { axvisor_linux_control_wait_fd_readable(user_fd_ref) } {
-            0 => Ok(()),
-            -4 | -125 => Err(AxError::Interrupted),
-            -11 => Err(AxError::WouldBlock),
-            -95 => Err(AxError::Unsupported),
-            _ => Err(AxError::Io),
-        }
-    }
-
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn cancel_user_fd_wait(user_fd_ref: control::UserFdRefId) -> AxResult {
-        match unsafe { axvisor_linux_control_cancel_fd_wait(user_fd_ref) } {
-            0 => Ok(()),
-            -95 => Err(AxError::Unsupported),
-            _ => Err(AxError::Io),
         }
     }
 

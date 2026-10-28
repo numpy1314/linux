@@ -50,10 +50,6 @@ u64 axvisor_linux_control_get_fd_ref(int fd);
 ssize_t axvisor_linux_control_write_fd_ref(u64 id, const void *buf,
 						   size_t length);
 ssize_t axvisor_linux_control_read_fd_ref(u64 id, void *buf, size_t length);
-#ifdef CONFIG_AXVISOR_ARM64_VHE
-int axvisor_linux_control_wait_fd_readable(u64 id);
-int axvisor_linux_control_cancel_fd_wait(u64 id);
-#endif
 int axvisor_linux_control_release_fd_ref(u64 id);
 u64 axvisor_linux_control_retain_user_address_space(void);
 int axvisor_linux_control_release_user_address_space(u64 id);
