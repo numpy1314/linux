@@ -246,6 +246,8 @@ static struct fixture create_fixture(long kvm, long run_size)
 		code[0] = calls[i]; code[1] = 0xf9000280; /* str x0,[x20] */
 		code[2] = 0x14000000;
 	}
+	u32 *startup = (u32 *)(f.ram + 0x80);
+	startup[0] = 0xf9000280; startup[1] = 0x14000000; /* str x0,[x20]; b . */
 	/* ldr/add/str/b forms a non-cooperating guest loop with guest DAIF masked. */
 	u32 *busy = (u32 *)(f.ram + 0x200);
 	busy[0] = 0xf9400262; busy[1] = 0x91000442; busy[2] = 0xf9000262; busy[3] = 0x17fffffd;
@@ -315,6 +317,33 @@ static void already_on(struct fixture *f)
 	eq("already_on_target_x0", get_reg(f->vcpu[1], 0), 0x12345678);
 	put("CPU_ON_ALREADY_ON=PASS\n");
 }
+static void pending_cpu_on(struct fixture *f)
+{
+	set_mp(f->vcpu[1], STOPPED);
+	set_reg(f->vcpu[1], 64, RAM + 0x200);
+	set_reg(f->vcpu[1], 0, 0x12345678);
+	prepare_call(f, 0xd4000002, 0x84000003);
+	set_reg(f->vcpu[0], 2, 1);
+	set_reg(f->vcpu[0], 4, RAM + 0x80);
+	set_reg(f->vcpu[0], 6, 0x11223344);
+	expect_mmio(f, 0);
+	/* Reading the pending target must consume its architectural reset first. */
+	eq("pending_start_pc", get_reg(f->vcpu[1], 64), RAM + 0x80);
+	eq("pending_start_context", get_reg(f->vcpu[1], 0), 0x11223344);
+	eq("pending_start_runnable", get_mp(f->vcpu[1]), RUNNABLE);
+	/* Userspace edits after that read must survive the target's first KVM_RUN. */
+	set_reg(f->vcpu[1], 0, 0x55667788);
+	set_reg(f->vcpu[1], 40, MMIO);
+	eq("pending_start_run", ioctl(f->vcpu[1], KVM_RUN, 0), 0);
+	u8 *run = f->run[1];
+	eq("pending_start_exit", *(u32 *)(run + 8), MMIO_EXIT);
+	eq("pending_start_mmio_address", *(u64 *)(run + 32), MMIO);
+	eq("pending_start_mmio_length", *(u32 *)(run + 48), 8);
+	eq("pending_start_mmio_write", run[52], 1);
+	eq("pending_start_override_survives", *(u64 *)(run + 40), 0x55667788);
+	eq("pending_start_executed_pc", get_reg(f->vcpu[1], 64), RAM + 0x84);
+	put("CPU_ON_PENDING_REGISTER_ACCESS=PASS\n");
+}
 static void system_event(struct fixture *f, int smc, int reset)
 {
 	prepare_call(f, smc ? 0xd4000003 : 0xd4000002, reset ? 0x84000009 : 0x84000008);
@@ -370,7 +399,7 @@ void _start(void)
 	need("open_kvm", kvm);
 	long run_size = need("run_size", ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0));
 	struct fixture f = create_fixture(kvm, run_size);
-	rejected_calls(&f); already_on(&f);
+	rejected_calls(&f); already_on(&f); pending_cpu_on(&f);
 	system_event(&f, 0, 0); system_event(&f, 0, 1);
 	system_event(&f, 1, 0); system_event(&f, 1, 1);
 	for (int i = 0; i < 2; i++) { unmap(f.run[i], run_size); close_fd(f.vcpu[i]); }

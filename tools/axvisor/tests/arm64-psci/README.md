@@ -15,6 +15,10 @@ It covers:
   the existing private HVC/unknown-exit path rather than swallowing it as SMC.
 - `CPU_ON` for an already runnable target, returning `ALREADY_ON` without
   overwriting the target PC or context register.
+- A successful `CPU_ON` of a stopped target, followed by `GET_ONE_REG` before
+  its first run. The read must observe the reset PC and context; a subsequent
+  `SET_ONE_REG` override must survive the first run rather than being replaced
+  by a late reset.
 - All four system-event combinations while the other vCPU runs a tight shared
   counter loop with guest IRQs masked. Once the originating `KVM_RUN` returns,
   both states must be STOPPED and the counter must stay unchanged. The secondary

@@ -86,6 +86,7 @@ def main():
     text = log_path.read_text(errors="replace")
     required_once = ("UNKNOWN_PSCI_HVC", "UNKNOWN_PSCI_SMC", "UNKNOWN_SMC",
                      "NONZERO_SMC_IMMEDIATE", "PRIVATE_HVC_SEPARATE", "CPU_ON_ALREADY_ON",
+                     "CPU_ON_PENDING_REGISTER_ACCESS",
                      "HVC_OFF", "HVC_RESET", "SMC_OFF", "SMC_RESET", "FD_BALANCE")
     checks = {name: len(re.findall(r"^" + name + r"=PASS\r?$", text, re.M)) == 1
               for name in required_once}
