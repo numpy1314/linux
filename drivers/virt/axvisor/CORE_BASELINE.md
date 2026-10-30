@@ -1,5 +1,8 @@
 # Shared Core baseline
 
+For the x86-product/native-KVM/ARM comparison and the evidence required before
+further adapter changes, see [ARM64_KVM_COMPARISON.md](ARM64_KVM_COMPARISON.md).
+
 The Linux adapter pins every tgoskits dependency to the unmodified x86
 reference revision:
 
