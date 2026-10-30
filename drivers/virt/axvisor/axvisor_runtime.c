@@ -32,6 +32,7 @@
 #ifdef CONFIG_AXVISOR_LINUX_CONTROL
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
+#include <linux/poll.h>
 #include <linux/sched/signal.h>
 #endif
 #include <asm/pgtable.h>
@@ -356,11 +357,45 @@ ssize_t axvisor_linux_control_read_fd_ref(u64 id, void *buf, size_t length)
 {
 	struct axvisor_linux_control_fd_ref *ref =
 		(struct axvisor_linux_control_fd_ref *)(uintptr_t)id;
+	struct poll_wqueues wait;
 	loff_t pos = 0;
+	ssize_t ret;
 
 	if (!ref || !ref->file || !buf)
 		return -EBADF;
-	return kernel_read(ref->file, buf, length, &pos);
+	ret = kernel_read(ref->file, buf, length, &pos);
+	if (ret != -EAGAIN || !file_can_poll(ref->file))
+		return ret;
+
+	poll_initwait(&wait);
+	wait.pt._key = EPOLLIN | EPOLLRDNORM | EPOLLERR | EPOLLHUP;
+	for (;;) {
+		__poll_t mask = vfs_poll(ref->file, &wait.pt);
+
+		/* Register once, then recheck the read to close the wakeup race. */
+		wait.pt._qproc = NULL;
+		ret = kernel_read(ref->file, buf, length, &pos);
+		if (ret != -EAGAIN)
+			break;
+		if (wait.error || (mask & (EPOLLERR | EPOLLHUP))) {
+			ret = wait.error ? wait.error : -EIO;
+			break;
+		}
+
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (signal_pending(current)) {
+			__set_current_state(TASK_RUNNING);
+			ret = -EINTR;
+			break;
+		}
+		if (!READ_ONCE(wait.triggered))
+			schedule();
+		__set_current_state(TASK_RUNNING);
+		/* Pair with pollwake(), before checking readiness again. */
+		smp_store_mb(wait.triggered, 0);
+	}
+	poll_freewait(&wait);
+	return ret;
 }
 
 int axvisor_linux_control_release_fd_ref(u64 id)
