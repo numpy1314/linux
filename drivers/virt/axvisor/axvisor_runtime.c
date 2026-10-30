@@ -416,7 +416,15 @@ int axvisor_linux_control_release_fd_ref(u64 id)
 
 u64 axvisor_linux_control_retain_user_address_space(void)
 {
-	return (u64)(uintptr_t)get_task_mm(current);
+	struct mm_struct *mm = current->mm;
+
+	if (!mm)
+		return 0;
+	/* Keep the descriptor, not its VMAs: a vCPU mmap holds its file alive
+	 * until exit_mmap(), and that file's release tears down the VM slots.
+	 */
+	mmgrab(mm);
+	return (u64)(uintptr_t)mm;
 }
 
 int axvisor_linux_control_release_user_address_space(u64 id)
@@ -425,7 +433,7 @@ int axvisor_linux_control_release_user_address_space(u64 id)
 
 	if (!mm)
 		return -EINVAL;
-	mmput(mm);
+	mmdrop(mm);
 	return 0;
 }
 
@@ -466,6 +474,12 @@ u64 axvisor_linux_control_pin_user_pages(u64 mm_id, unsigned long addr,
 		kfree(pinned);
 		return 0;
 	}
+	/* The retained mm may outlive its process and address space. */
+	if (!mmget_not_zero(mm)) {
+		axvisor_linux_dealloc(pinned->pages);
+		kfree(pinned);
+		return 0;
+	}
 	mmap_read_lock(mm);
 	vma = find_vma(mm, first);
 	if (npages == 1 && vma && first >= vma->vm_start &&
@@ -488,6 +502,7 @@ u64 axvisor_linux_control_pin_user_pages(u64 mm_id, unsigned long addr,
 				*page_count = 1;
 				follow_pfnmap_end(&args);
 				mmap_read_unlock(mm);
+				mmput(mm);
 				return (u64)(uintptr_t)pinned;
 			}
 		}
@@ -497,6 +512,7 @@ u64 axvisor_linux_control_pin_user_pages(u64 mm_id, unsigned long addr,
 	ret = pin_user_pages_remote(mm, first, npages, flags, pinned->pages, &locked);
 	if (locked)
 		mmap_read_unlock(mm);
+	mmput(mm);
 	if (ret != npages) {
 		if (ret > 0)
 			unpin_user_pages(pinned->pages, ret);
