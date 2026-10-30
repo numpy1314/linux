@@ -148,8 +148,6 @@ unsafe extern "C" {
         generation: u64,
         blocked_signals: *const u8,
         length: usize,
-        timed: bool,
-        deadline_nanos: u64,
     ) -> i32;
 }
 
@@ -632,8 +630,7 @@ impl control::ControlIf for LinuxHost {
         queue: usize,
         condition: Box<dyn Fn() -> bool + Send + 'static>,
         blocked_signals: &[u8],
-        deadline: Option<u64>,
-    ) -> AxResult<bool> {
+    ) -> AxResult {
         wait::wait_control_until(
             condition,
             || unsafe { axvisor_linux_wait_queue_generation(queue) },
@@ -644,13 +641,10 @@ impl control::ControlIf for LinuxHost {
                         observed,
                         blocked_signals.as_ptr(),
                         blocked_signals.len(),
-                        deadline.is_some(),
-                        deadline.unwrap_or(0),
                     )
                 });
                 match ret {
-                    0 => Ok(true),
-                    1 => Ok(false),
+                    0 => Ok(()),
                     -4 => Err(AxError::Interrupted),
                     -11 => Err(AxError::WouldBlock),
                     -22 => Err(AxError::InvalidInput),

@@ -69,8 +69,7 @@ unsigned long axvisor_linux_arch_host_fdt_paddr(void);
 void axvisor_linux_arch_capture_host_fdt(void);
 #ifdef CONFIG_ARM64
 int axvisor_linux_control_wait_since(unsigned long queue, u64 generation,
-				    const u8 *blocked_bytes, size_t length,
-				    bool timed, u64 deadline_nanos);
+				    const u8 *blocked_bytes, size_t length);
 unsigned long axvisor_linux_arm64_gic_info(unsigned int which);
 unsigned int axvisor_linux_arm64_guest_levels(void);
 int axvisor_linux_vhe_control_begin(void);

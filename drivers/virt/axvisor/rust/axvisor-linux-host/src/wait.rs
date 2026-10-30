@@ -24,18 +24,14 @@ pub(crate) fn wait_until(
 pub(crate) fn wait_control_until<E>(
     condition: impl Fn() -> bool,
     mut generation: impl FnMut() -> u64,
-    mut wait_since: impl FnMut(u64) -> Result<bool, E>,
-) -> Result<bool, E> {
+    mut wait_since: impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
     loop {
         let observed = generation();
         if condition() {
-            return Ok(true);
+            return Ok(());
         }
-        if !wait_since(observed)? {
-            // Resolve a notification racing with expiry in favour of the
-            // durable predicate, not the timer's wakeup classification.
-            return Ok(condition());
-        }
+        wait_since(observed)?;
     }
 }
 
@@ -116,10 +112,10 @@ mod tests {
             || generation.get(),
             |seen| {
                 generation.set(seen + 1);
-                Ok(true)
+                Ok(())
             },
         );
-        assert_eq!(result, Ok(true));
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
@@ -131,22 +127,24 @@ mod tests {
     }
 
     #[test]
-    fn control_wait_timeout_rechecks_ready() {
+    fn control_wait_does_not_lose_notification_before_enrollment() {
         let ready = Cell::new(false);
+        let generation = Cell::new(0);
         assert_eq!(
             wait_control_until::<()>(
-                || ready.get(),
-                || 0,
-                |_| {
+                || {
+                    let was_ready = ready.get();
                     ready.set(true);
-                    Ok(false)
+                    generation.set(1);
+                    was_ready
+                },
+                || generation.get(),
+                |observed| {
+                    assert_ne!(observed, generation.get(), "lost notification");
+                    Ok(())
                 }
             ),
-            Ok(true)
-        );
-        assert_eq!(
-            wait_control_until::<()>(|| false, || 0, |_| Ok(false)),
-            Ok(false)
+            Ok(())
         );
     }
 

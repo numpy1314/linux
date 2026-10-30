@@ -70,11 +70,13 @@ void axvisor_linux_wait_queue_wait(unsigned long handle)
  * A control-vCPU wait is interruptible, unlike the existing SyncIf lock wait.
  * Rust samples generation before evaluating its predicate. Enrolling here
  * before rechecking generation closes the predicate-to-sleep wakeup gap.
- * Return 0 for a notification, 1 for timeout, or a negative errno.
+ * The private deadline supports bounded KUnit probes only; the production
+ * control contract waits for a notification or signal, with no timeout.
+ * Return 0 for a notification, 1 for test timeout, or a negative errno.
  */
-int axvisor_linux_control_wait_since(unsigned long handle, u64 generation,
-				    const u8 *blocked_bytes, size_t length,
-				    bool timed, u64 deadline_nanos)
+static int axvisor_control_wait_since_deadline(unsigned long handle, u64 generation,
+					       const u8 *blocked_bytes, size_t length,
+					       bool timed, u64 deadline_nanos)
 {
 	struct axvisor_wait_queue *queue = (void *)handle;
 	sigset_t blocked, saved_real;
@@ -127,6 +129,13 @@ int axvisor_linux_control_wait_since(unsigned long handle, u64 generation,
 		current->real_blocked = saved_real;
 	}
 	return ret;
+}
+
+int axvisor_linux_control_wait_since(unsigned long handle, u64 generation,
+				    const u8 *blocked_bytes, size_t length)
+{
+	return axvisor_control_wait_since_deadline(handle, generation, blocked_bytes,
+						 length, false, 0);
 }
 #endif
 
@@ -283,12 +292,12 @@ static void axvisor_control_wait_generation_timeout(struct kunit *test)
 	generation = axvisor_linux_wait_queue_generation(queue);
 	axvisor_linux_wait_queue_wake_all(queue);
 	KUNIT_EXPECT_EQ(test, axvisor_linux_control_wait_since(queue, generation,
-			NULL, 0, false, 0), 0);
+			NULL, 0), 0);
 	generation = axvisor_linux_wait_queue_generation(queue);
-	KUNIT_EXPECT_EQ(test, axvisor_linux_control_wait_since(queue, generation,
+	KUNIT_EXPECT_EQ(test, axvisor_control_wait_since_deadline(queue, generation,
 			NULL, 0, true, ktime_get_ns() + 2 * NSEC_PER_MSEC), 1);
 	local_irq_save(flags);
-	ret = axvisor_linux_control_wait_since(queue, generation, NULL, 0, false, 0);
+	ret = axvisor_linux_control_wait_since(queue, generation, NULL, 0);
 	local_irq_restore(flags);
 	KUNIT_EXPECT_EQ(test, ret, -EWOULDBLOCK);
 	axvisor_linux_wait_queue_destroy(queue);
@@ -322,8 +331,7 @@ static int axvisor_control_signal_thread(void *arg)
 	sigaddset(&blocked, SIGUSR1);
 	sigdelset(&blocked, SIGUSR2);
 	ctx->result = axvisor_linux_control_wait_since(ctx->queue, ctx->generation,
-			(const u8 *)&blocked, sizeof(blocked), true,
-			ktime_get_ns() + 2 * NSEC_PER_SEC);
+			(const u8 *)&blocked, sizeof(blocked));
 	ctx->restored = sigequalsets(&original, &current->blocked) &&
 			sigequalsets(&original_real, &current->real_blocked);
 	flush_signals(current);

@@ -663,6 +663,12 @@ int axvisor_linux_control_pending_signal(const u8 *blocked_bytes, size_t length)
 	} else {
 		blocked = current->blocked;
 	}
+#ifdef CONFIG_ARM64
+	/* Match the interruptible control wait: KVM masks cannot suppress
+	 * SIGKILL or SIGSTOP while the vCPU is running either.
+	 */
+	sigdelsetmask(&blocked, sigmask(SIGKILL) | sigmask(SIGSTOP));
+#endif
 	spin_lock_irqsave(&current->sighand->siglock, flags);
 	sigorsets(&pending, &current->pending.signal,
 		  &current->signal->shared_pending.signal);
