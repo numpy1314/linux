@@ -377,6 +377,7 @@ static void run_round(long kvm, long run_size, long round)
 	metric("VCPU_TARGET", init.target);
 	for (u64 i = 0; i < 7; i++)
 		init.features[i] = 0;
+	init.features[0] = 1U << 2; /* KVM_ARM_VCPU_PSCI_0_2 */
 	equal("vcpu_init", ioctl(vcpu, KVM_ARM_VCPU_INIT, &init), 0);
 	set_attr(device, 4, 0, 0);
 	set_reg(vcpu, 0, GUEST_MMIO); /* x0 */
