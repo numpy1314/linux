@@ -36,6 +36,13 @@ module_param_named(guest_cpus, axvisor_guest_cpus, charp, 0444);
 MODULE_PARM_DESC(guest_cpus,
 		"CPU list for control ioctls; default all online CPUs; each ioctl is migration-pinned");
 
+/* Keep the existing scheduling budget by default. Disabling it permits
+ * functional tests to prove request/kick progress without periodic polling.
+ */
+static bool axvisor_vhe_watchdog_enabled = true;
+module_param_named(watchdog, axvisor_vhe_watchdog_enabled, bool, 0444);
+MODULE_PARM_DESC(watchdog, "Enable the ARM KVM_RUN periodic exit budget (default true)");
+
 /* These raw CPU facts must agree within the execution pool. In particular,
  * Core reads PFR0/PFR1/ISAR1 while constructing the VM to select HCR.TID3.
  * Keep physical CPU ids unchanged: Core per-CPU storage covers all online
@@ -183,9 +190,10 @@ static void axvisor_vhe_start_watchdog(void)
 {
 	axvisor_vhe_mask_guest_timer();
 	enable_percpu_irq(axvisor_vtimer_irq, axvisor_vtimer_irq_flags);
-	hrtimer_start(this_cpu_ptr(&axvisor_vhe_watchdog),
-		      ns_to_ktime(AXVISOR_VHE_WATCHDOG_NS),
-		      HRTIMER_MODE_REL_PINNED);
+	if (axvisor_vhe_watchdog_enabled)
+		hrtimer_start(this_cpu_ptr(&axvisor_vhe_watchdog),
+			      ns_to_ktime(AXVISOR_VHE_WATCHDOG_NS),
+			      HRTIMER_MODE_REL_PINNED);
 }
 
 /* KVM_RUN is migration-pinned; the caller holds axvisor_vhe_run_lock. */
@@ -356,8 +364,8 @@ int axvisor_linux_vhe_run_begin(void)
 	}
 	/* control_begin() pins migration, while the mutex serializes tasks
 	 * sharing a CPU. Like KVM's per-vCPU timer load/put ownership, leave
-	 * host-only CPUs alone. The periodic budget itself is still specific
-	 * to this adapter: shared Core has no request/kick callback.
+	 * host-only CPUs alone. The periodic budget remains independent of
+	 * Core's targeted requests and can be disabled to validate their progress.
 	 */
 	if (!*this_cpu_ptr(&axvisor_vhe_cpu_runs))
 		axvisor_vhe_start_watchdog();
