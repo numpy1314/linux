@@ -1,0 +1,303 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Included in disposable fs/eventfd.c to use the real static do_eventfd(). */
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/fdtable.h>
+#include <linux/init.h>
+#include <linux/kthread.h>
+#include <linux/reboot.h>
+#include <linux/sched/cputime.h>
+#include <linux/sched/signal.h>
+#include <linux/task_work.h>
+
+/* Production declarations normally come from axvisor_ffi.h. */
+u64 axvisor_linux_control_get_fd_ref(int fd);
+ssize_t axvisor_linux_control_write_fd_ref(u64 id, const void *buf, size_t length);
+ssize_t axvisor_linux_control_read_fd_ref(u64 id, void *buf, size_t length);
+int axvisor_linux_control_release_fd_ref(u64 id);
+void axvisor_linux_join_task(unsigned long handle);
+
+/* EXTRACTED_ADAPTER_CALLBACKS */
+
+static unsigned int fh_checks, fh_failures;
+
+#define FH_CHECK(condition, name) do { \
+	fh_checks++; \
+	if (!(condition)) { \
+		fh_failures++; \
+		pr_err("FH_EVENTFD FAIL %s line=%u\n", name, __LINE__); \
+	} \
+} while (0)
+
+struct fh_event {
+	int fd;
+	u64 ref;
+	/* An independent observer reference permits checks after adapter release. */
+	struct eventfd_ctx *observer;
+};
+
+struct fh_reader {
+	struct task_struct *task;
+	struct axvisor_task_start *start;
+	struct fh_event *event;
+	struct completion entered;
+	atomic_t cancel;
+	bool cancel_loop;
+	bool allow_usr1;
+	ssize_t result;
+	u64 value;
+	unsigned int deliveries;
+};
+
+static void __noreturn fh_abort(const char *reason)
+{
+	pr_err("FH_EVENTFD ABORT %s\n", reason);
+	pr_info("FH_EVENTFD RESULT checks=%u failures=%u completed=0\n",
+		fh_checks, fh_failures + 1);
+	kernel_power_off();
+	for (;;)
+		msleep(1000);
+}
+
+static bool fh_waiters_present(struct eventfd_ctx *ctx)
+{
+	unsigned long flags;
+	bool present;
+
+	spin_lock_irqsave(&ctx->wqh.lock, flags);
+	present = waitqueue_active(&ctx->wqh);
+	spin_unlock_irqrestore(&ctx->wqh.lock, flags);
+	return present;
+}
+
+static void fh_event_create(struct fh_event *event, unsigned int initial)
+{
+	event->fd = do_eventfd(initial, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (event->fd < 0)
+		fh_abort("do_eventfd failed");
+	event->ref = axvisor_linux_control_get_fd_ref(event->fd);
+	if (!event->ref)
+		fh_abort("adapter get_fd_ref failed");
+	event->observer = eventfd_ctx_fdget(event->fd);
+	if (IS_ERR(event->observer))
+		fh_abort("observer reference failed");
+}
+
+static void fh_event_destroy(struct fh_event *event)
+{
+	FH_CHECK(!fh_waiters_present(event->observer), "no_waiter_before_release");
+	FH_CHECK(!axvisor_linux_control_release_fd_ref(event->ref), "release_fd_ref");
+	FH_CHECK(!close_fd(event->fd), "close_original_fd");
+	/* This initcall never returns to userspace to drain deferred fput work. */
+	task_work_run();
+	flush_delayed_fput();
+	FH_CHECK(!fh_waiters_present(event->observer), "no_waiter_after_release");
+	FH_CHECK(refcount_read(&event->observer->kref.refcount) == 1,
+		 "only_observer_reference_remains");
+	eventfd_ctx_put(event->observer);
+}
+
+static int fh_read_entry(void *opaque)
+{
+	struct fh_reader *reader = opaque;
+
+	if (reader->allow_usr1)
+		allow_signal(SIGUSR1);
+	complete(&reader->entered);
+	do {
+		reader->result = axvisor_linux_control_read_fd_ref(reader->event->ref,
+				&reader->value, sizeof(reader->value));
+		/* Same cancellation ordering as Core's irqfd listener. */
+		if (atomic_read_acquire(&reader->cancel))
+			break;
+		if (reader->result == sizeof(reader->value) && reader->value)
+			reader->deliveries++;
+		if (!reader->cancel_loop)
+			break;
+		cond_resched();
+	} while (!kthread_should_stop());
+	return 0;
+}
+
+static void fh_reader_start(struct fh_reader *reader, struct fh_event *event,
+			    bool cancel_loop, bool allow_usr1)
+{
+	memset(reader, 0, sizeof(*reader));
+	reader->event = event;
+	reader->cancel_loop = cancel_loop;
+	reader->allow_usr1 = allow_usr1;
+	atomic_set(&reader->cancel, 0);
+	init_completion(&reader->entered);
+	reader->start = kzalloc(sizeof(*reader->start), GFP_KERNEL);
+	if (!reader->start)
+		fh_abort("reader allocation failed");
+	reader->start->entry = fh_read_entry;
+	reader->start->data = reader;
+	init_completion(&reader->start->done);
+	reader->task = kthread_create(axvisor_linux_task_main, reader->start,
+				      "fh-eventfd-test");
+	if (IS_ERR(reader->task)) {
+		pr_err("FH_EVENTFD kthread_create errno=%ld\n", PTR_ERR(reader->task));
+		fh_abort("kthread_create failed");
+	}
+	/* Retain before wakeup, including the case where a queued read exits fast. */
+	get_task_struct(reader->task);
+	wake_up_process(reader->task);
+	if (!wait_for_completion_timeout(&reader->entered, msecs_to_jiffies(5000)))
+		fh_abort("reader did not start");
+}
+
+static bool fh_wait_blocked(struct fh_reader *reader)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(2500);
+
+	do {
+		if (completion_done(&reader->start->done))
+			return false;
+		if (fh_waiters_present(reader->event->observer) &&
+		    (READ_ONCE(reader->task->__state) & TASK_INTERRUPTIBLE))
+			return true;
+		msleep(1);
+	} while (time_before(jiffies, deadline));
+	return false;
+}
+
+static void fh_reader_join(struct fh_reader *reader)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(5000);
+
+	/* Observe without consuming completion: the actual adapter join consumes it. */
+	while (!completion_done(&reader->start->done)) {
+		if (time_after_eq(jiffies, deadline))
+			fh_abort("reader failed to exit after wake/cancel/signal");
+		msleep(1);
+	}
+	axvisor_linux_join_task((unsigned long)reader->start);
+	/* The Core-facing join waits for entry completion; also reap the test task. */
+	FH_CHECK(kthread_stop(reader->task) == 0, "reader_task_reaped");
+	put_task_struct(reader->task);
+	FH_CHECK(!fh_waiters_present(reader->event->observer), "poll_waiter_detached");
+}
+
+static void fh_signal_event(struct fh_event *event)
+{
+	u64 one = 1;
+
+	FH_CHECK(axvisor_linux_control_write_fd_ref(event->ref, &one, sizeof(one)) ==
+		 sizeof(one), "adapter_signal_one");
+}
+
+static void fh_test_queued(void)
+{
+	struct fh_event event;
+	struct fh_reader reader;
+	unsigned int before = fh_failures;
+
+	fh_event_create(&event, 1);
+	fh_reader_start(&reader, &event, false, false);
+	fh_reader_join(&reader);
+	FH_CHECK(reader.result == sizeof(u64) && reader.value == 1,
+		 "queued_event_consumed");
+	fh_event_destroy(&event);
+	pr_info("FH_EVENTFD CASE queued_before_reader failures=%u\n", fh_failures - before);
+}
+
+static void fh_test_idle(void)
+{
+	struct fh_event event;
+	struct fh_reader reader;
+	u64 cpu_before, cpu_ns, wall_before, wall_ns;
+	unsigned int before = fh_failures;
+
+	fh_event_create(&event, 0);
+	fh_reader_start(&reader, &event, false, false);
+	FH_CHECK(fh_wait_blocked(&reader), "empty_eventfd_blocks");
+	cpu_before = task_sched_runtime(reader.task);
+	wall_before = ktime_get_ns();
+	msleep(150);
+	wall_ns = ktime_get_ns() - wall_before;
+	cpu_ns = task_sched_runtime(reader.task) - cpu_before;
+	FH_CHECK(!completion_done(&reader.start->done), "empty_read_stays_pending");
+	FH_CHECK(READ_ONCE(reader.task->__state) & TASK_INTERRUPTIBLE,
+		 "reader_is_sleeping");
+	FH_CHECK(cpu_ns < wall_ns / 8 + 1000000, "idle_cpu_under_12_percent_plus_1ms");
+	pr_info("FH_EVENTFD IDLE cpu_ns=%llu wall_ns=%llu\n", cpu_ns, wall_ns);
+	fh_signal_event(&event);
+	fh_reader_join(&reader);
+	FH_CHECK(reader.result == sizeof(u64) && reader.value == 1,
+		 "sleeping_read_wakes_with_value");
+	fh_event_destroy(&event);
+	pr_info("FH_EVENTFD CASE idle_then_wake failures=%u\n", fh_failures - before);
+}
+
+static void fh_test_cancel(void)
+{
+	struct fh_event event;
+	struct fh_reader reader;
+	unsigned int before = fh_failures;
+
+	fh_event_create(&event, 0);
+	fh_reader_start(&reader, &event, true, false);
+	FH_CHECK(fh_wait_blocked(&reader), "cancel_reader_blocks");
+	atomic_set_release(&reader.cancel, 1);
+	fh_signal_event(&event);
+	fh_reader_join(&reader);
+	FH_CHECK(reader.result == sizeof(u64), "cancel_wakes_read");
+	FH_CHECK(reader.deliveries == 0, "cancel_event_not_injected");
+	fh_event_destroy(&event);
+	pr_info("FH_EVENTFD CASE cancel_write_join_release failures=%u\n", fh_failures - before);
+}
+
+static void fh_test_signal(void)
+{
+	struct fh_event event;
+	struct fh_reader reader;
+	unsigned int before = fh_failures;
+
+	fh_event_create(&event, 0);
+	fh_reader_start(&reader, &event, false, true);
+	FH_CHECK(fh_wait_blocked(&reader), "signal_reader_blocks");
+	FH_CHECK(send_sig(SIGUSR1, reader.task, 1) == 0, "send_usr1");
+	fh_reader_join(&reader);
+	FH_CHECK(reader.result == -EINTR, "read_interrupted");
+	fh_event_destroy(&event);
+	pr_info("FH_EVENTFD CASE signal_interrupt failures=%u\n", fh_failures - before);
+}
+
+static void fh_test_lifetimes(void)
+{
+	unsigned int i, before = fh_failures;
+
+	for (i = 0; i < 32; i++) {
+		struct fh_event event;
+		struct fh_reader reader;
+
+		fh_event_create(&event, 0);
+		fh_reader_start(&reader, &event, false, false);
+		/* Alternate a verified sleeping reader with a registration/wakeup race. */
+		if (i & 1)
+			FH_CHECK(fh_wait_blocked(&reader), "repeated_reader_blocks");
+		fh_signal_event(&event);
+		fh_reader_join(&reader);
+		FH_CHECK(reader.result == sizeof(u64) && reader.value == 1,
+			 "repeated_event_consumed");
+		fh_event_destroy(&event);
+	}
+	pr_info("FH_EVENTFD CASE repeated_lifetimes rounds=32 failures=%u\n",
+		fh_failures - before);
+}
+
+static int __init fh_eventfd_test_init(void)
+{
+	pr_info("FH_EVENTFD START online_cpus=%u\n", num_online_cpus());
+	fh_test_queued();
+	fh_test_idle();
+	fh_test_cancel();
+	fh_test_signal();
+	fh_test_lifetimes();
+	pr_info("FH_EVENTFD RESULT checks=%u failures=%u completed=1\n",
+		fh_checks, fh_failures);
+	kernel_power_off();
+	return fh_failures ? -EINVAL : 0;
+}
+late_initcall_sync(fh_eventfd_test_init);
