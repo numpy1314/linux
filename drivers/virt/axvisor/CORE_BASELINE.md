@@ -56,8 +56,11 @@ Linux owns physical interrupt acknowledgement and completion. `fetch_irq`
 reads `ICC_HPPIR1_EL1` without acknowledging the IRQ, so Core can classify a
 host IRQ exit and reach its scheduling point even with `PREEMPT_NONE`. The
 peeked INTID is not dispatched through Core's software IRQ registry. The adapter
-registers the guest virtual-timer PPI and runs a 5 ms per-CPU hrtimer while any
-`KVM_RUN` is active. The hrtimer provides an exit opportunity even when a guest
+registers the guest virtual-timer PPI and runs a 5 ms hrtimer only on CPUs with
+an active `KVM_RUN`. Migration is pinned for the ioctl; concurrent vCPU tasks
+on the same CPU share a reference-counted timer/PPI activation. The last
+run on that CPU cancels the timer and disables the PPI. Host-only CPUs are not
+woken for another CPU's guest. The hrtimer provides an exit opportunity even when a guest
 does not program a timer; it is not a guarantee that `KVM_RUN` returns to
 userspace within 5 ms. The unmigrated direct-VM timer-injection callback remains
 an explicit unsupported path, not a silent no-op.

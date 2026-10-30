@@ -48,6 +48,7 @@ struct axvisor_vhe_guest_profile {
 };
 static struct axvisor_vhe_guest_profile axvisor_guest_profile;
 static DEFINE_PER_CPU(struct hrtimer, axvisor_vhe_watchdog);
+static DEFINE_PER_CPU(unsigned int, axvisor_vhe_cpu_runs);
 static DEFINE_MUTEX(axvisor_vhe_run_lock);
 static unsigned int axvisor_vhe_running;
 static bool axvisor_vhe_ready;
@@ -61,8 +62,8 @@ static enum hrtimer_restart axvisor_vhe_watchdog_expired(struct hrtimer *timer)
 {
 	/* Linux owns the physical IRQ and its ACK. Keep a future deadline armed
 	 * even when a previous expiry was serviced before the next guest entry.
-	 * All admitted CPUs have a timer while any KVM_RUN is active, including
-	 * CPUs selected by another vCPU thread or by a later control ioctl.
+	 * Only CPUs hosting an active KVM_RUN have a timer. Multiple sleeping
+	 * vCPU tasks on one CPU share it until the last run on that CPU ends.
 	 */
 	hrtimer_forward_now(timer, ns_to_ktime(AXVISOR_VHE_WATCHDOG_NS));
 	return HRTIMER_RESTART;
@@ -178,9 +179,8 @@ static void axvisor_vhe_sample_cpu(void *failed)
 	}
 }
 
-static void axvisor_vhe_start_watchdog(void *unused)
+static void axvisor_vhe_start_watchdog(void)
 {
-	(void)unused;
 	axvisor_vhe_mask_guest_timer();
 	enable_percpu_irq(axvisor_vtimer_irq, axvisor_vtimer_irq_flags);
 	hrtimer_start(this_cpu_ptr(&axvisor_vhe_watchdog),
@@ -188,21 +188,12 @@ static void axvisor_vhe_start_watchdog(void *unused)
 		      HRTIMER_MODE_REL_PINNED);
 }
 
-static void axvisor_vhe_disable_timer_irq(void *unused)
+/* KVM_RUN is migration-pinned; the caller holds axvisor_vhe_run_lock. */
+static void axvisor_vhe_stop_watchdog(void)
 {
-	(void)unused;
 	disable_percpu_irq(axvisor_vtimer_irq);
 	axvisor_vhe_mask_guest_timer();
-}
-
-/* The caller holds axvisor_vhe_run_lock. CPU hotplug is excluded by admission. */
-static void axvisor_vhe_stop_watchdogs(void)
-{
-	unsigned int cpu;
-
-	on_each_cpu(axvisor_vhe_disable_timer_irq, NULL, 1);
-	for_each_online_cpu(cpu)
-		hrtimer_cancel(per_cpu_ptr(&axvisor_vhe_watchdog, cpu));
+	hrtimer_cancel(this_cpu_ptr(&axvisor_vhe_watchdog));
 }
 
 int axvisor_linux_vhe_prepare(void)
@@ -363,8 +354,14 @@ int axvisor_linux_vhe_run_begin(void)
 		mutex_unlock(&axvisor_vhe_run_lock);
 		return -ENODEV;
 	}
-	if (!axvisor_vhe_running)
-		on_each_cpu(axvisor_vhe_start_watchdog, NULL, 1);
+	/* control_begin() pins migration, while the mutex serializes tasks
+	 * sharing a CPU. Like KVM's per-vCPU timer load/put ownership, leave
+	 * host-only CPUs alone. The periodic budget itself is still specific
+	 * to this adapter: shared Core has no request/kick callback.
+	 */
+	if (!*this_cpu_ptr(&axvisor_vhe_cpu_runs))
+		axvisor_vhe_start_watchdog();
+	(*this_cpu_ptr(&axvisor_vhe_cpu_runs))++;
 	axvisor_vhe_running++;
 	mutex_unlock(&axvisor_vhe_run_lock);
 	kernel_neon_begin();
@@ -375,12 +372,14 @@ void axvisor_linux_vhe_run_end(void)
 {
 	kernel_neon_end();
 	mutex_lock(&axvisor_vhe_run_lock);
-	if (WARN_ON_ONCE(!axvisor_vhe_running)) {
+	if (WARN_ON_ONCE(!axvisor_vhe_running ||
+			 !*this_cpu_ptr(&axvisor_vhe_cpu_runs))) {
 		mutex_unlock(&axvisor_vhe_run_lock);
 		return;
 	}
-	if (!--axvisor_vhe_running)
-		axvisor_vhe_stop_watchdogs();
+	if (!--(*this_cpu_ptr(&axvisor_vhe_cpu_runs)))
+		axvisor_vhe_stop_watchdog();
+	axvisor_vhe_running--;
 	mutex_unlock(&axvisor_vhe_run_lock);
 }
 
