@@ -8,7 +8,7 @@ import re
 import subprocess
 import time
 
-FAULTS = r"FC_STOP_(?:GUEST_FAIL|HOST_FAIL|EXEC_ERROR|HOST_RESULT=FAIL)|HOST_POWEROFF_ERROR|Kernel panic|core panic:|panicked at|BUG:|WARNING:|Oops:|Call trace:|soft lockup|rcu[^\n]*stall"
+FAULTS = r"FC_STOP_(?:GUEST_FAIL|HOST_FAIL|EXEC_ERROR|HOST_RESULT=FAIL)|HOST_POWEROFF_ERROR|Failed to send VcpuEvent::Finish|Failed signaling vcpu exit event|Kernel panic|core panic:|panicked at|BUG:|WARNING:|Oops:|Call trace:|soft lockup|rcu[^\n]*stall"
 
 
 def sha(path):
@@ -39,7 +39,7 @@ def main():
     if sha(image) != manifest["files"][image.name]["sha256"]:
         parser.error("initramfs does not match its build manifest")
     cpus = manifest["firecracker_cpu_affinity"]
-    if cpus not in ([2], [2, 3]) or manifest["expected_firecracker_exit_code"] != 1:
+    if cpus not in ([2], [2, 3]) or manifest["accepted_firecracker_exit_codes"] != [0, 1]:
         parser.error("unsupported affinity or expected Firecracker exit")
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -74,16 +74,22 @@ def main():
             time.sleep(0.05)
         returncode = process.wait()
     text = log_path.read_text(errors="replace")
-    markers = ("FC_STOP_AFFINITY", "FC_STOP_BUSY_COUNTER", "FC_STOP_EXPECTED_EXIT_ONE",
+    markers = ("FC_STOP_AFFINITY", "FC_STOP_BUSY_COUNTER", "FC_STOP_EXPECTED_EXIT",
                "FC_STOP_FD_BALANCE", "FC_STOP_HOST_AFTER_EXIT")
     checks = {name: len(re.findall(r"^" + name + r"=PASS\r?$", text, re.M)) == 1 for name in markers}
     checks.update({"natural_outer_exit": returncode == 0 and not stopped and not timed_out,
                    "host_result": "FC_STOP_HOST_RESULT=PASS" in text,
                    "hosted_endpoint": "AxVisor KVM control endpoint registered: kvm" in text,
                    "expected_unknown_exit": "Unexpected exit reason on vcpu run: Unknown" in text,
+                   "vmm_stop": "Vmm is stopping." in text,
+                   "normal_fc_wait_status": re.findall(r"^FC_STOP_WAIT_STATUS=(\d+)\r?$", text, re.M)
+                                            in (["0"], ["256"]),
+                   "fc_exit_code": re.findall(r"^FC_STOP_EXIT_CODE=(\d+)\r?$", text, re.M)
+                                   in (["0"], ["1"]),
                    "vm_cleanup": text.count("resources cleanup completed") == 1,
                    "no_psci_terminal_exit": "Received KVM_SYSTEM_EVENT" not in text and
-                                            "Received KVM_EXIT_SHUTDOWN" not in text,
+                                            "Received KVM_EXIT_SHUTDOWN" not in text and
+                                            "Received KVM_EXIT_HLT" not in text,
                    "affinity_mask": re.findall(r"^FC_STOP_CPU_MASK=(\d+)\r?$", text, re.M)
                                     == [str(manifest["firecracker_cpu_mask"])],
                    "no_faults": not re.search(FAULTS, text, re.I)})
@@ -91,7 +97,8 @@ def main():
                "faults": re.findall(FAULTS, text, re.I), "returncode": returncode,
                "timed_out": timed_out, "stopped_on_fault": stopped,
                "elapsed_seconds": time.monotonic() - started,
-               "intentional_vmm_exit_code": 1}
+               "accepted_vmm_exit_codes": [0, 1],
+               "observed_vmm_exit_codes": re.findall(r"^FC_STOP_EXIT_CODE=(\d+)\r?$", text, re.M)}
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     print(json.dumps(verdict, indent=2))
     raise SystemExit(0 if verdict["pass"] else 1)

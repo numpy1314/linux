@@ -84,7 +84,7 @@ def main():
              guest_elf, guest_image, host, firecracker, config_path, initramfs)
     manifest = {"commands": commands, "guest_vcpus": 2, "guest_memory_mib": 512,
                 "firecracker_cpu_affinity": cpus, "firecracker_cpu_mask": mask,
-                "expected_firecracker_exit_code": 1, "lifecycles": 1,
+                "accepted_firecracker_exit_codes": [0, 1], "lifecycles": 1,
                 "compiler": subprocess.check_output([args.cross_compile + "gcc", "--version"], text=True).splitlines()[0],
                 "files": {p.name: {"sha256": sha(p), "bytes": p.stat().st_size} for p in files},
                 "scope": "actual Firecracker UNKNOWN-exit -> Finish/signal -> busy-vCPU join/cleanup; no PSCI terminal event"}

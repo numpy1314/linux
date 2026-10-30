@@ -12,16 +12,25 @@ KVM_EXIT_UNKNOWN for that HVC. Firecracker reports the intentionally unhandled
 exit and takes its normal error-exit path, which must send Finish and interrupt
 the other vCPU before joining and dropping its resources.
 
-Firecracker exit code 1 is expected for this deliberately erroneous guest.
-The host init must naturally reap that exact exit status, continue executing,
+Firecracker v1.10.1 publishes its exit event before sending the vCPU's
+`Exited(GenericError)` channel response (`vstate/vcpu/mod.rs::exit`). Its VMM
+event handler nonblockingly drains available responses, choosing `Ok` if no
+error response is visible yet (`lib.rs::process`). Therefore the fixture
+strictly accepts a natural exit code of **0 or 1** for this deliberate Unknown
+exit, while requiring the Unknown-error log and `Vmm is stopping.` independently.
+Source ordering establishes this possible race; an exit-0 log alone does not
+identify the precise instruction where the threads were scheduled.
+
+The host init must naturally reap one of those two normal exit statuses, continue executing,
 successfully query the KVM endpoint again, and preserve its fd count. The
 runner also requires the busy-counter marker, the intended Unknown exit, Core
 VM cleanup, no PSCI terminal exit, and a natural successful outer host exit.
 A timeout, forced outer termination, kernel fault, missing cleanup, or any
-other Firecracker status fails. Parent fd balance alone is not proof of zero
+other Firecracker status fails. Signal deaths, arbitrary nonzero exit codes,
+and failures to send Finish or the vCPU exit event are rejected. Parent fd balance alone is not proof of zero
 kernel leaks; it is paired with child reaping and the Core cleanup marker.
 
-Both microVM vCPUs use 512 MiB RAM. There is no guest disk, network, or Linux
+The two-vCPU microVM uses 512 MiB RAM. There is no guest disk, network, or Linux
 userspace. With no virtio devices or boot timer, the UART is the first MMIO
 device and occupies Firecracker's first MMIO page at 0x40000000. That ordering
 is fixed by the pinned v1.10.1 builder. No timer or cooperative halt is used by
