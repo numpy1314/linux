@@ -22,9 +22,9 @@ vmx = ["axvisor_core/vmx"]
 conformance-test = ["dep:axvisor-linux-conformance"]
 
 [dependencies]
-axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
-axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
+axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", default-features = false }
+axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", default-features = false }
 axvisor-linux-conformance = { path = "../axvisor-linux-conformance", optional = true }
-ax-percpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", features = ["custom-base", "external-base"] }
+ax-percpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", features = ["custom-base", "external-base"] }
 log = "0.4"
-arm_vcpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", optional = true }
+arm_vcpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", optional = true }

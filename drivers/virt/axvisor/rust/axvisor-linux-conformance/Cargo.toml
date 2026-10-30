@@ -8,6 +8,6 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
-axvisor_conformance = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc" }
-axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "f6c897bc10582089bb5b8bb9a06a6d85b84c69dc", default-features = false }
+axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", default-features = false }
+axvisor_conformance = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181" }
+axvisor_core = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", default-features = false }
