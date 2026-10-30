@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: GPL-2.0
+/* QEMU-only test initcall; uses Linux's real FPSIMD ownership and scheduler. */
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/kthread.h>
+#include <linux/preempt.h>
+#include <linux/reboot.h>
+#include <linux/sched.h>
+#include <asm/neon.h>
+#include <asm/simd.h>
+
+/* EXTRACTED_SIMD_HELPERS */
+
+extern int fh_simd_rust_call(unsigned int mode);
+static unsigned int fh_checks, fh_failures, fh_callbacks;
+
+#define FH_CHECK(condition, name) do { \
+	fh_checks++; \
+	if (!(condition)) { \
+		fh_failures++; \
+		pr_err("FH_SIMD FAIL %s\n", name); \
+	} \
+} while (0)
+
+static void fh_vector_write(u64 value)
+{
+	/* The C translation unit is compiled with -mgeneral-regs-only. These
+	 * explicit instructions are the only vector-register users in the test.
+	 */
+	asm volatile("fmov d0, %x0" : : "r" (value));
+}
+
+static u64 fh_vector_read(void)
+{
+	u64 value;
+
+	asm volatile("fmov %x0, d0" : "=r" (value));
+	return value;
+}
+
+int fh_simd_linux_callback(unsigned int mode)
+{
+	const u64 pattern = 0x123456789abcdef0ULL;
+
+	fh_callbacks++;
+	if (mode == 3) {
+		FH_CHECK(irqs_disabled(), "irqoff_callback_irqs");
+		FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "irqoff_keeps_owner");
+		return 17;
+	}
+	FH_CHECK(!test_thread_flag(TIF_KERNEL_FPSTATE), "callback_owner_released");
+	if (test_thread_flag(TIF_KERNEL_FPSTATE))
+		return -EBUSY; /* Avoid the real nesting BUG_ON after a detected failure. */
+	kernel_neon_begin();
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "callback_acquires_owner");
+	fh_vector_write(pattern);
+	if (mode == 2)
+		msleep(10);
+	FH_CHECK(fh_vector_read() == pattern, "callback_vector_value");
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "callback_owner_after_sleep");
+	kernel_neon_end();
+	return mode == 1 ? -EIO : 17;
+}
+
+static void fh_case_no_owner(void)
+{
+	unsigned int before = fh_failures;
+
+	FH_CHECK(!test_thread_flag(TIF_KERNEL_FPSTATE), "initial_owner_clear");
+	FH_CHECK(!axvisor_linux_vhe_pause_simd(), "no_owner_pause_false");
+	FH_CHECK(fh_simd_rust_call(0) == 17, "no_owner_rust_result");
+	FH_CHECK(!test_thread_flag(TIF_KERNEL_FPSTATE), "no_owner_remains_clear");
+	pr_info("FH_SIMD CASE no_owner failures=%u\n", fh_failures - before);
+}
+
+static void fh_case_call(unsigned int mode, const char *name)
+{
+	unsigned int before = fh_failures;
+	int result;
+
+	kernel_neon_begin();
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "outer_owner_set");
+	result = fh_simd_rust_call(mode);
+	FH_CHECK(result == (mode == 1 ? -EIO : 17), "rust_result");
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "drop_restores_owner");
+	kernel_neon_end();
+	FH_CHECK(!test_thread_flag(TIF_KERNEL_FPSTATE), "outer_owner_released");
+	pr_info("FH_SIMD CASE %s failures=%u\n", name, fh_failures - before);
+}
+
+static void fh_case_irqoff(void)
+{
+	unsigned int before = fh_failures;
+	unsigned long flags;
+
+	kernel_neon_begin();
+	local_irq_save(flags);
+	FH_CHECK(!axvisor_linux_vhe_pause_simd(), "irqoff_pause_false");
+	FH_CHECK(fh_simd_rust_call(3) == 17, "irqoff_rust_result");
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "irqoff_owner_still_set");
+	local_irq_restore(flags);
+	kernel_neon_end();
+	pr_info("FH_SIMD CASE irqoff failures=%u\n", fh_failures - before);
+}
+
+struct fh_worker {
+	struct completion done;
+	bool owner_seen;
+};
+
+static int fh_worker_main(void *data)
+{
+	struct fh_worker *worker = data;
+
+	kernel_neon_begin();
+	worker->owner_seen = test_thread_flag(TIF_KERNEL_FPSTATE);
+	fh_vector_write(0xfedcba9876543210ULL);
+	kernel_neon_end();
+	complete(&worker->done);
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
+	return 0;
+}
+
+static void fh_case_schedule(void)
+{
+	const u64 pattern = 0x13579bdf2468ace0ULL;
+	unsigned int before = fh_failures;
+	struct fh_worker worker;
+	struct task_struct *task;
+	unsigned long completed;
+
+	init_completion(&worker.done);
+	worker.owner_seen = false;
+	migrate_disable();
+	task = kthread_create(fh_worker_main, &worker, "fh-simd-worker");
+	FH_CHECK(!IS_ERR(task), "worker_created");
+	if (IS_ERR(task)) {
+		migrate_enable();
+		goto done;
+	}
+	/* Force an actual same-CPU switch through a different SIMD user. */
+	kthread_bind(task, smp_processor_id());
+	kernel_neon_begin();
+	fh_vector_write(pattern);
+	wake_up_process(task);
+	completed = wait_for_completion_timeout(&worker.done, 5 * HZ);
+	FH_CHECK(completed != 0, "worker_completed");
+	FH_CHECK(worker.owner_seen, "worker_acquired_neon");
+	FH_CHECK(test_thread_flag(TIF_KERNEL_FPSTATE), "owner_survives_schedule");
+	FH_CHECK(fh_vector_read() == pattern, "vector_survives_competing_task");
+	kernel_neon_end();
+	kthread_stop(task);
+	migrate_enable();
+done:
+	pr_info("FH_SIMD CASE schedule failures=%u\n", fh_failures - before);
+}
+
+static int __init fh_simd_test_init(void)
+{
+	FH_CHECK(may_use_simd(), "may_use_simd");
+	if (may_use_simd()) {
+		fh_case_no_owner();
+		fh_case_call(0, "nested_success");
+		fh_case_call(1, "nested_error");
+		fh_case_call(2, "callback_sleep");
+		fh_case_irqoff();
+		fh_case_schedule();
+	}
+	FH_CHECK(fh_callbacks == 5, "all_rust_callbacks_ran");
+	pr_info("FH_SIMD RESULT checks=%u failures=%u callbacks=%u completed=1\n",
+		fh_checks, fh_failures, fh_callbacks);
+	kernel_power_off();
+	return 0;
+}
+late_initcall(fh_simd_test_init);
