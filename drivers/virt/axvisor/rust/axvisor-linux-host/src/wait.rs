@@ -18,9 +18,30 @@ pub(crate) fn wait_until(
     }
 }
 
+/// An interruptible control wait keeps the same notification-before-predicate
+/// ordering without changing SyncIf's uninterruptible lock-wait semantics.
+#[cfg(any(all(feature = "control", target_arch = "aarch64"), test))]
+pub(crate) fn wait_control_until<E>(
+    condition: impl Fn() -> bool,
+    mut generation: impl FnMut() -> u64,
+    mut wait_since: impl FnMut(u64) -> Result<bool, E>,
+) -> Result<bool, E> {
+    loop {
+        let observed = generation();
+        if condition() {
+            return Ok(true);
+        }
+        if !wait_since(observed)? {
+            // Resolve a notification racing with expiry in favour of the
+            // durable predicate, not the timer's wakeup classification.
+            return Ok(condition());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::wait_until;
+    use super::{wait_control_until, wait_until};
     use std::cell::Cell;
 
     #[test]
@@ -84,6 +105,48 @@ mod tests {
             || generation.get() == 0,
             || generation.get(),
             |observed| generation.set(observed.wrapping_add(1)),
+        );
+    }
+
+    #[test]
+    fn control_wait_rechecks_after_notification() {
+        let generation = Cell::new(0);
+        let result = wait_control_until::<()>(
+            || generation.get() == 2,
+            || generation.get(),
+            |seen| {
+                generation.set(seen + 1);
+                Ok(true)
+            },
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn control_wait_reports_interruption() {
+        assert_eq!(
+            wait_control_until(|| false, || 0, |_| Err("interrupted")),
+            Err("interrupted")
+        );
+    }
+
+    #[test]
+    fn control_wait_timeout_rechecks_ready() {
+        let ready = Cell::new(false);
+        assert_eq!(
+            wait_control_until::<()>(
+                || ready.get(),
+                || 0,
+                |_| {
+                    ready.set(true);
+                    Ok(false)
+                }
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            wait_control_until::<()>(|| false, || 0, |_| Ok(false)),
+            Ok(false)
         );
     }
 

@@ -3,6 +3,11 @@
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
+#ifdef CONFIG_ARM64
+#include <linux/hrtimer.h>
+#include <linux/sched/signal.h>
+#include <linux/timekeeping.h>
+#endif
 
 #include "axvisor_ffi.h"
 
@@ -59,6 +64,71 @@ void axvisor_linux_wait_queue_wait(unsigned long handle)
 	axvisor_linux_wait_queue_wait_since(handle,
 			axvisor_linux_wait_queue_generation(handle));
 }
+
+#ifdef CONFIG_ARM64
+/*
+ * A control-vCPU wait is interruptible, unlike the existing SyncIf lock wait.
+ * Rust samples generation before evaluating its predicate. Enrolling here
+ * before rechecking generation closes the predicate-to-sleep wakeup gap.
+ * Return 0 for a notification, 1 for timeout, or a negative errno.
+ */
+int axvisor_linux_control_wait_since(unsigned long handle, u64 generation,
+				    const u8 *blocked_bytes, size_t length,
+				    bool timed, u64 deadline_nanos)
+{
+	struct axvisor_wait_queue *queue = (void *)handle;
+	sigset_t blocked, saved_real;
+	ktime_t deadline = min_t(u64, deadline_nanos, KTIME_MAX);
+	DEFINE_WAIT(wait);
+	int ret;
+
+	if (!queue || length > sizeof(blocked) || (length && !blocked_bytes))
+		return -EINVAL;
+	if (irqs_disabled() || in_atomic())
+		return -EWOULDBLOCK;
+	/* A custom KVM signal mask must affect the scheduler's signal_pending
+	 * test as well as our explicit predicate. Otherwise an ignored signal
+	 * spins the wait, or a newly unblocked signal never wakes it.
+	 */
+	if (length) {
+		memset(&blocked, 0, sizeof(blocked));
+		memcpy(&blocked, blocked_bytes, length);
+		sigdelsetmask(&blocked, sigmask(SIGKILL) | sigmask(SIGSTOP));
+		/* Like kvm_sigset_activate(), retain the original mask in
+		 * real_blocked so signal generation does not mistake a temporary
+		 * unblock for the userspace thread's permanent delivery mask.
+		 */
+		saved_real = current->real_blocked;
+		sigprocmask(SIG_SETMASK, &blocked, &current->real_blocked);
+	}
+	for (;;) {
+		prepare_to_wait(&queue->head, &wait, TASK_INTERRUPTIBLE);
+		if (axvisor_linux_wait_queue_generation(handle) != generation) {
+			ret = 0;
+			break;
+		}
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
+		if (timed && ktime_compare(ktime_get(), deadline) >= 0) {
+			ret = 1;
+			break;
+		}
+		if (timed)
+			schedule_hrtimeout_range_clock(&deadline, 0, HRTIMER_MODE_ABS,
+						 CLOCK_MONOTONIC);
+		else
+			schedule();
+	}
+	finish_wait(&queue->head, &wait);
+	if (length) {
+		sigprocmask(SIG_SETMASK, &current->real_blocked, NULL);
+		current->real_blocked = saved_real;
+	}
+	return ret;
+}
+#endif
 
 void axvisor_linux_wait_queue_wake_one(unsigned long handle)
 {
@@ -201,11 +271,114 @@ static void axvisor_wait_old_order_control(struct kunit *test)
 	axvisor_wait_thread_case(test, true);
 }
 
+#ifdef CONFIG_ARM64
+static void axvisor_control_wait_generation_timeout(struct kunit *test)
+{
+	unsigned long queue = axvisor_linux_wait_queue_create();
+	unsigned long flags;
+	u64 generation;
+	int ret;
+
+	KUNIT_ASSERT_NE(test, queue, 0UL);
+	generation = axvisor_linux_wait_queue_generation(queue);
+	axvisor_linux_wait_queue_wake_all(queue);
+	KUNIT_EXPECT_EQ(test, axvisor_linux_control_wait_since(queue, generation,
+			NULL, 0, false, 0), 0);
+	generation = axvisor_linux_wait_queue_generation(queue);
+	KUNIT_EXPECT_EQ(test, axvisor_linux_control_wait_since(queue, generation,
+			NULL, 0, true, ktime_get_ns() + 2 * NSEC_PER_MSEC), 1);
+	local_irq_save(flags);
+	ret = axvisor_linux_control_wait_since(queue, generation, NULL, 0, false, 0);
+	local_irq_restore(flags);
+	KUNIT_EXPECT_EQ(test, ret, -EWOULDBLOCK);
+	axvisor_linux_wait_queue_destroy(queue);
+}
+
+struct axvisor_control_signal_test {
+	unsigned long queue;
+	u64 generation;
+	struct completion done;
+	wait_queue_head_t stop;
+	int result;
+	bool restored;
+};
+
+static int axvisor_control_signal_thread(void *arg)
+{
+	struct axvisor_control_signal_test *ctx = arg;
+	sigset_t original, original_real, blocked;
+
+	allow_signal(SIGUSR1);
+	allow_signal(SIGUSR2);
+	/* Originally USR1 is allowed and USR2 is blocked. The wait must apply
+	 * the opposite mask for both pending-signal checks and scheduler wake.
+	 */
+	sigemptyset(&blocked);
+	sigaddset(&blocked, SIGUSR2);
+	sigprocmask(SIG_BLOCK, &blocked, NULL);
+	original = current->blocked;
+	original_real = current->real_blocked;
+	blocked = original;
+	sigaddset(&blocked, SIGUSR1);
+	sigdelset(&blocked, SIGUSR2);
+	ctx->result = axvisor_linux_control_wait_since(ctx->queue, ctx->generation,
+			(const u8 *)&blocked, sizeof(blocked), true,
+			ktime_get_ns() + 2 * NSEC_PER_SEC);
+	ctx->restored = sigequalsets(&original, &current->blocked) &&
+			sigequalsets(&original_real, &current->real_blocked);
+	flush_signals(current);
+	complete(&ctx->done);
+	wait_event(ctx->stop, kthread_should_stop());
+	return 0;
+}
+
+static void axvisor_control_wait_signal_mask(struct kunit *test)
+{
+	struct axvisor_control_signal_test ctx;
+	struct task_struct *task;
+	bool registered;
+
+	ctx.queue = axvisor_linux_wait_queue_create();
+	KUNIT_ASSERT_NE(test, ctx.queue, 0UL);
+	ctx.generation = axvisor_linux_wait_queue_generation(ctx.queue);
+	init_completion(&ctx.done);
+	init_waitqueue_head(&ctx.stop);
+	ctx.result = -EINPROGRESS;
+	ctx.restored = false;
+	task = kthread_run(axvisor_control_signal_thread, &ctx, "axvisor-signal-test");
+	if (IS_ERR(task)) {
+		axvisor_linux_wait_queue_destroy(ctx.queue);
+		KUNIT_FAIL(test, "cannot start signal waiter");
+		return;
+	}
+	registered = axvisor_wait_registered((void *)ctx.queue);
+	KUNIT_EXPECT_TRUE(test, registered);
+	if (registered) {
+		KUNIT_EXPECT_EQ(test, send_sig(SIGUSR1, task, 1), 0);
+		KUNIT_EXPECT_EQ(test, wait_for_completion_timeout(&ctx.done,
+				msecs_to_jiffies(20)), 0UL);
+		KUNIT_EXPECT_EQ(test, send_sig(SIGUSR2, task, 1), 0);
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&ctx.done,
+				msecs_to_jiffies(1000)), 0UL);
+	}
+	/* Also release a broken wait implementation, keeping failures bounded. */
+	axvisor_linux_wait_queue_wake_all(ctx.queue);
+	kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ctx.result, -EINTR);
+	KUNIT_EXPECT_TRUE(test, ctx.restored);
+	axvisor_linux_wait_queue_destroy(ctx.queue);
+}
+#endif
+
 static struct kunit_case axvisor_wait_cases[] = {
 	KUNIT_CASE(axvisor_wait_before_registration),
 	KUNIT_CASE(axvisor_wait_atomic_and_wrap),
 	KUNIT_CASE(axvisor_wait_after_registration),
 	KUNIT_CASE(axvisor_wait_old_order_control),
+#ifdef CONFIG_ARM64
+	KUNIT_CASE(axvisor_control_wait_generation_timeout),
+	KUNIT_CASE(axvisor_control_wait_signal_mask),
+#endif
 	{}
 };
 

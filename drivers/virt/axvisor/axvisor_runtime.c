@@ -15,6 +15,7 @@
 #include <linux/atomic.h>
 #include <linux/cpumask.h>
 #include <linux/smp.h>
+#include <linux/cpu.h>
 #include <linux/percpu.h>
 #include <linux/spinlock.h>
 #include <linux/of_fdt.h>
@@ -669,6 +670,51 @@ int axvisor_linux_control_pending_signal(const u8 *blocked_bytes, size_t length)
 	sigandnsets(&pending, &pending, &blocked);
 	return sigisemptyset(&pending) ? 0 : 1;
 }
+
+#ifdef CONFIG_ARM64
+size_t axvisor_linux_control_current_cpu(void)
+{
+	unsigned long flags;
+	size_t cpu;
+
+	/* The Core publishes this sample in its own bound, IRQ-off window.
+	 * This helper does not promise affinity after it returns.
+	 */
+	local_irq_save(flags);
+	cpu = smp_processor_id();
+	local_irq_restore(flags);
+	return cpu;
+}
+
+static void axvisor_linux_control_kick_ack(void *unused)
+{
+	/* Reaching a normal Linux IPI handler proves the guest world switch
+	 * restored the host exception context. No guest IRQ is synthesized.
+	 */
+	(void)unused;
+}
+
+int axvisor_linux_control_kick_cpu_wait(size_t cpu)
+{
+	int ret;
+
+	/* Waiting for an IPI with IRQs disabled can deadlock against another
+	 * CPU issuing the same operation. Core must drop its IRQ-safe locks.
+	 */
+	if (irqs_disabled() || in_atomic())
+		return -EWOULDBLOCK;
+	if (cpu >= nr_cpu_ids)
+		return -EINVAL;
+	cpus_read_lock();
+	if (!cpu_online(cpu))
+		ret = -ENODEV;
+	else
+		ret = smp_call_function_single(cpu, axvisor_linux_control_kick_ack,
+					      NULL, 1);
+	cpus_read_unlock();
+	return ret;
+}
+#endif
 
 int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area)
 {

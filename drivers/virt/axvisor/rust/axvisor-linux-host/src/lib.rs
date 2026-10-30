@@ -138,6 +138,19 @@ unsafe extern "C" {
     fn axvisor_linux_control_release_pinned_pages(id: u64) -> i32;
     #[cfg(feature = "control")]
     fn axvisor_linux_control_pending_signal(blocked_bytes: *const u8, length: usize) -> i32;
+    #[cfg(all(feature = "control", target_arch = "aarch64"))]
+    fn axvisor_linux_control_current_cpu() -> usize;
+    #[cfg(all(feature = "control", target_arch = "aarch64"))]
+    fn axvisor_linux_control_kick_cpu_wait(cpu: usize) -> i32;
+    #[cfg(all(feature = "control", target_arch = "aarch64"))]
+    fn axvisor_linux_control_wait_since(
+        queue: usize,
+        generation: u64,
+        blocked_signals: *const u8,
+        length: usize,
+        timed: bool,
+        deadline_nanos: u64,
+    ) -> i32;
 }
 
 pub struct LinuxHost;
@@ -593,6 +606,58 @@ impl control::ControlIf for LinuxHost {
             1 => Ok(true),
             _ => Err(AxError::InvalidInput),
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn current_cpu_id() -> usize {
+        // Called in the Core's short IRQ-off publication window. Do not
+        // release SIMD ownership or introduce a scheduling point here.
+        unsafe { axvisor_linux_control_current_cpu() }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn kick_cpu_wait(cpu: usize) -> AxResult {
+        let ret = host_call::call(|| unsafe { axvisor_linux_control_kick_cpu_wait(cpu) });
+        match ret {
+            0 => Ok(()),
+            -11 => Err(AxError::WouldBlock),
+            -22 => Err(AxError::InvalidInput),
+            -19 => Err(AxError::NotFound),
+            _ => Err(AxError::Io),
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn wait_control_until(
+        queue: usize,
+        condition: Box<dyn Fn() -> bool + Send + 'static>,
+        blocked_signals: &[u8],
+        deadline: Option<u64>,
+    ) -> AxResult<bool> {
+        wait::wait_control_until(
+            condition,
+            || unsafe { axvisor_linux_wait_queue_generation(queue) },
+            |observed| {
+                let ret = host_call::call(|| unsafe {
+                    axvisor_linux_control_wait_since(
+                        queue,
+                        observed,
+                        blocked_signals.as_ptr(),
+                        blocked_signals.len(),
+                        deadline.is_some(),
+                        deadline.unwrap_or(0),
+                    )
+                });
+                match ret {
+                    0 => Ok(true),
+                    1 => Ok(false),
+                    -4 => Err(AxError::Interrupted),
+                    -11 => Err(AxError::WouldBlock),
+                    -22 => Err(AxError::InvalidInput),
+                    _ => Err(AxError::Io),
+                }
+            },
+        )
     }
 
     fn retain_current_user_address_space() -> AxResult<control::UserAddressSpaceId> {
