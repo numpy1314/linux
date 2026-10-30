@@ -33,6 +33,7 @@
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
 #include <linux/poll.h>
+#include <linux/kvm.h>
 #include <linux/sched/signal.h>
 #endif
 #include <asm/pgtable.h>
@@ -110,6 +111,74 @@ struct axvisor_linux_control_fd_ref {
 	struct eventfd_ctx *eventfd;
 #endif
 };
+
+#ifdef CONFIG_ARM64
+/* KVM_CREATE_DEVICE returns its fd through user memory. Keep that fd private
+ * until Core has completed the copy-out, using the existing create_user_fd
+ * interface. Usercopy may sleep; transaction ownership is task-based. Only
+ * the owning synchronous ioctl accesses its payload.
+ */
+struct axvisor_linux_fd_transaction {
+	struct list_head link;
+	struct task_struct *task;
+	struct file *file;
+	int fd;
+};
+static LIST_HEAD(axvisor_fd_transactions);
+static DEFINE_SPINLOCK(axvisor_fd_transaction_lock);
+
+static struct axvisor_linux_fd_transaction *axvisor_current_fd_transaction(void)
+{
+	struct axvisor_linux_fd_transaction *transaction;
+	unsigned long flags;
+
+	spin_lock_irqsave(&axvisor_fd_transaction_lock, flags);
+	list_for_each_entry(transaction, &axvisor_fd_transactions, link) {
+		if (transaction->task == current) {
+			spin_unlock_irqrestore(&axvisor_fd_transaction_lock, flags);
+			return transaction;
+		}
+	}
+	spin_unlock_irqrestore(&axvisor_fd_transaction_lock, flags);
+	return NULL;
+}
+
+static long axvisor_linux_create_device_ioctl(u64 control_file,
+					    unsigned int cmd, unsigned long arg)
+{
+	struct axvisor_linux_fd_transaction transaction = {
+		.task = current,
+		.fd = -1,
+	};
+	unsigned long flags;
+	long ret;
+
+	spin_lock_irqsave(&axvisor_fd_transaction_lock, flags);
+	list_add(&transaction.link, &axvisor_fd_transactions);
+	spin_unlock_irqrestore(&axvisor_fd_transaction_lock, flags);
+	ret = axvisor_linux_control_ioctl(control_file, cmd, arg);
+	spin_lock_irqsave(&axvisor_fd_transaction_lock, flags);
+	list_del(&transaction.link);
+	spin_unlock_irqrestore(&axvisor_fd_transaction_lock, flags);
+	if (transaction.file) {
+		if (!ret) {
+			fd_install(transaction.fd, transaction.file);
+		} else {
+			struct axvisor_linux_control_anon *anon =
+				transaction.file->private_data;
+
+			/* Core closes the device id on copy-out failure. Release
+			 * only this unpublished Linux file and reserved fd here.
+			 */
+			anon->control_file = 0;
+			fput(transaction.file);
+			put_unused_fd(transaction.fd);
+		}
+	}
+	return ret;
+}
+#endif
+
 extern long axvisor_linux_control_ioctl(u64 control_file, u32 cmd,
 						unsigned long arg);
 
@@ -139,8 +208,18 @@ static long axvisor_linux_control_ioctl_file(struct file *file,
 						     unsigned long arg)
 {
 	u64 control_file = (u64)(uintptr_t)file->private_data;
+#ifdef CONFIG_ARM64
+	long ret = axvisor_linux_vhe_control_begin();
+
+	if (ret)
+		return ret;
+	ret = axvisor_linux_control_ioctl(control_file, cmd, arg);
+	axvisor_linux_vhe_control_end();
+	return ret;
+#else
 
 	return axvisor_linux_control_ioctl(control_file, cmd, arg);
+#endif
 }
 
 static long axvisor_linux_control_anon_ioctl_file(struct file *file,
@@ -148,10 +227,32 @@ static long axvisor_linux_control_anon_ioctl_file(struct file *file,
 							  unsigned long arg)
 {
 	struct axvisor_linux_control_anon *anon = file->private_data;
+#ifdef CONFIG_ARM64
+	long ret;
+#endif
 
 	if (!anon)
 		return -EBADF;
+#ifdef CONFIG_ARM64
+	ret = axvisor_linux_vhe_control_begin();
+	if (ret)
+		return ret;
+	if (cmd == KVM_CREATE_DEVICE) {
+		ret = axvisor_linux_create_device_ioctl(anon->control_file, cmd, arg);
+	} else if (cmd == KVM_RUN) {
+		ret = axvisor_linux_vhe_run_begin();
+		if (!ret) {
+			ret = axvisor_linux_control_ioctl(anon->control_file, cmd, arg);
+			axvisor_linux_vhe_run_end();
+		}
+	} else {
+		ret = axvisor_linux_control_ioctl(anon->control_file, cmd, arg);
+	}
+	axvisor_linux_vhe_control_end();
+	return ret;
+#else
 	return axvisor_linux_control_ioctl(anon->control_file, cmd, arg);
+#endif
 }
 
 static int axvisor_linux_control_release_anon(struct inode *inode,
@@ -572,6 +673,10 @@ int axvisor_linux_control_pending_signal(const u8 *blocked_bytes, size_t length)
 int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area)
 {
 	struct axvisor_linux_control_anon *anon;
+#ifdef CONFIG_ARM64
+	struct axvisor_linux_fd_transaction *transaction =
+		axvisor_current_fd_transaction();
+#endif
 
 	if (!control_file)
 		return -EINVAL;
@@ -580,6 +685,32 @@ int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area)
 		return -ENOMEM;
 	anon->control_file = control_file;
 	anon->mmap = (struct axvisor_linux_control_mmap *)(uintptr_t)mmap_area;
+#ifdef CONFIG_ARM64
+	if (transaction) {
+		struct file *file;
+		int fd;
+
+		if (transaction->file) {
+			kfree(anon);
+			return -EBUSY;
+		}
+		fd = get_unused_fd_flags(O_CLOEXEC);
+		if (fd < 0) {
+			kfree(anon);
+			return fd;
+		}
+		file = anon_inode_getfile("axvisor-kvm", &axvisor_linux_control_anon_fops,
+					 anon, O_RDWR);
+		if (IS_ERR(file)) {
+			put_unused_fd(fd);
+			kfree(anon);
+			return PTR_ERR(file);
+		}
+		transaction->fd = fd;
+		transaction->file = file;
+		return fd;
+	}
+#endif
 	{
 		int fd = anon_inode_getfd("axvisor-kvm", &axvisor_linux_control_anon_fops,
 					 anon, O_RDWR | O_CLOEXEC);
@@ -589,42 +720,6 @@ int axvisor_linux_control_create_fd(u64 control_file, u64 mmap_area)
 	}
 }
 
-int axvisor_linux_control_create_fd_at(u64 control_file, int __user *result)
-{
-	struct axvisor_linux_control_anon *anon;
-	struct file *file;
-	int fd, error;
-
-	if (!control_file)
-		return -EINVAL;
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0)
-		return fd;
-	anon = kzalloc(sizeof(*anon), GFP_KERNEL);
-	if (!anon) {
-		error = -ENOMEM;
-		goto release_fd;
-	}
-	file = anon_inode_getfile("axvisor-kvm", &axvisor_linux_control_anon_fops,
-				 anon, O_RDWR);
-	if (IS_ERR(file)) {
-		error = PTR_ERR(file);
-		kfree(anon);
-		goto release_fd;
-	}
-	if (copy_to_user(result, &fd, sizeof(fd))) {
-		/* Core still owns the id; release only the unpublished file. */
-		fput(file);
-		error = -EFAULT;
-		goto release_fd;
-	}
-	anon->control_file = control_file;
-	fd_install(fd, file);
-	return 0;
-release_fd:
-	put_unused_fd(fd);
-	return error;
-}
 #endif
 
 /* Names expected by zerocopy, mapped to Linux's linker symbols. */
@@ -830,6 +925,11 @@ int axvisor_linux_console_register_endpoint(void)
 	return misc_register(&axvisor_linux_console_input_device);
 }
 
+void axvisor_linux_console_unregister_endpoint(void)
+{
+	misc_deregister(&axvisor_linux_console_input_device);
+}
+
 u64 axvisor_linux_time_current_time_nanos(void)
 {
 	return ktime_get_mono_fast_ns();
@@ -860,6 +960,8 @@ void axvisor_linux_time_set_oneshot_timer(u64 deadline_nanos)
 	preempt_enable();
 }
 static unsigned long axvisor_host_fdt_paddr_saved;
+/* Only the ARM snapshot is owned here; firmware/RISC-V FDT memory is borrowed. */
+static void *axvisor_host_fdt_copy;
 
 void axvisor_linux_arch_capture_host_fdt(void)
 {
@@ -872,8 +974,10 @@ void axvisor_linux_arch_capture_host_fdt(void)
 		void *copy = kmemdup(initial_boot_params,
 				    fdt_totalsize(initial_boot_params), GFP_KERNEL);
 
-		if (copy)
+		if (copy) {
+			axvisor_host_fdt_copy = copy;
 			axvisor_host_fdt_paddr_saved = virt_to_phys(copy);
+		}
 	}
 #else
 	axvisor_host_fdt_paddr_saved = 0;
@@ -1247,6 +1351,28 @@ void axvisor_linux_memory_prepare_io_maps(void)
 		}
 	}
 #endif
+}
+
+/*
+ * Unwind preparation only while the Core thread has never run. Once Core
+ * initialization starts, its tasks and timer callbacks may retain pointers
+ * into these objects; they must then remain allocated until reboot.
+ */
+void axvisor_linux_cleanup_before_core_start(void)
+{
+	vfree(axvisor_percpu_area);
+	axvisor_percpu_area = NULL;
+	axvisor_percpu_stride = 0;
+	while (axvisor_io_map_count) {
+		struct axvisor_io_map *map = &axvisor_io_maps[--axvisor_io_map_count];
+		void __iomem *mapped = map->virt;
+
+		memset(map, 0, sizeof(*map));
+		iounmap(mapped);
+	}
+	kfree(axvisor_host_fdt_copy);
+	axvisor_host_fdt_copy = NULL;
+	axvisor_host_fdt_paddr_saved = 0;
 }
 
 unsigned long axvisor_linux_memory_virt_to_phys(unsigned long addr)

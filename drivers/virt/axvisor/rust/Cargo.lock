@@ -321,7 +321,6 @@ dependencies = [
 name = "axvisor-linux-core"
 version = "0.1.0"
 dependencies = [
- "arm_vcpu",
  "ax-percpu",
  "axvisor-linux-conformance",
  "axvisor_api",

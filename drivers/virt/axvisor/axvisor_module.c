@@ -17,9 +17,6 @@ MODULE_PARM_DESC(control,
 static int axvisor_linux_core_thread(void *unused)
 {
 	(void)unused;
-#ifdef CONFIG_AXVISOR_ARM64_VHE_SELFTEST
-	return axvisor_linux_vhe_selftest();
-#endif
 #ifdef CONFIG_AXVISOR_LINUX_CONFORMANCE
 	if (axvisor_linux_conformance_enabled())
 		return axvisor_linux_conformance_run();
@@ -28,8 +25,17 @@ static int axvisor_linux_core_thread(void *unused)
 	if (axvisor_control_mode) {
 		int ret = axvisor_linux_core_control_boot();
 
-		if (ret)
+		if (ret) {
 			pr_err("axvisor-linux: control initialization failed (%d)\n", ret);
+			axvisor_linux_console_unregister_endpoint();
+#ifdef CONFIG_ARM64
+			axvisor_linux_vhe_cleanup();
+#endif
+			/* Core may already have initialized per-CPU objects and timers.
+			 * Keep their backing and MMIO mappings alive until reboot.
+			 */
+			pr_warn("axvisor-linux: retaining initialized Core resources until reboot\n");
+		}
 		return ret;
 	}
 #endif
@@ -42,6 +48,15 @@ static int __init axvisor_linux_init(void)
 	int ret;
 
 #ifdef CONFIG_ARM64
+#ifndef CONFIG_AXVISOR_LINUX_CONTROL
+	pr_err("axvisor-linux: ARM VHE requires the control endpoint\n");
+	return -EOPNOTSUPP;
+#else
+	if (!axvisor_control_mode) {
+		pr_err("axvisor-linux: ARM VHE static VM mode is not supported\n");
+		return -EOPNOTSUPP;
+	}
+#endif
 	ret = axvisor_linux_arm64_vhe_enabled() ? axvisor_linux_vhe_prepare() : -EOPNOTSUPP;
 	if (ret) {
 		pr_err("axvisor-linux: VHE runtime admission refused (%d)\n", ret);
@@ -52,7 +67,7 @@ static int __init axvisor_linux_init(void)
 	if (ret) {
 		pr_err("axvisor-linux: failed to register console input (%d)\n",
 		       ret);
-		return ret;
+		goto failed;
 	}
 
 	/* Snapshot the boot FDT address while the architecture's __initdata is
@@ -66,18 +81,28 @@ static int __init axvisor_linux_init(void)
 	ret = axvisor_linux_percpu_prepare();
 	if (ret) {
 		pr_err("axvisor-linux: failed to prepare per-CPU storage (%d)\n", ret);
-		return ret;
+		goto failed_preparation;
 	}
 	pr_info("axvisor-linux: starting AxVisor core kthread\n");
 	task = kthread_create(axvisor_linux_core_thread, NULL, "axvisor-core");
 	if (IS_ERR(task)) {
 		pr_err("axvisor-linux: failed to start AxVisor core kthread\n");
-		return PTR_ERR(task);
+		ret = PTR_ERR(task);
+		goto failed_preparation;
 	}
 	/* Bind the bootstrap thread before it can execute.  Per-CPU
 	 * initialization tasks enable virtualization on the remaining CPUs. */
 	kthread_bind(task, 0);
 	wake_up_process(task);
 	return 0;
+
+failed_preparation:
+	axvisor_linux_cleanup_before_core_start();
+	axvisor_linux_console_unregister_endpoint();
+failed:
+#ifdef CONFIG_ARM64
+	axvisor_linux_vhe_cleanup();
+#endif
+	return ret;
 }
 late_initcall(axvisor_linux_init);

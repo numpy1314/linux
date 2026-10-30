@@ -24,6 +24,9 @@ use axvisor_api::{
 
 extern crate alloc;
 
+#[path = "../../host-call.rs"]
+mod host_call;
+
 mod wait;
 
 unsafe extern "C" {
@@ -83,10 +86,6 @@ unsafe extern "C" {
     fn axvisor_linux_prepare_irq_vector(vector: usize) -> bool;
     #[cfg(target_arch = "aarch64")]
     fn axvisor_linux_arm64_gic_info(which: u32) -> usize;
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn axvisor_linux_vhe_enter() -> isize;
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn axvisor_linux_vhe_exit(token: usize);
     #[cfg(feature = "control")]
     fn axvisor_linux_control_register_endpoint() -> i32;
     #[cfg(feature = "control")]
@@ -94,8 +93,6 @@ unsafe extern "C" {
     #[cfg(feature = "control")]
     fn axvisor_linux_control_copy_to_user(dst: usize, src: *const u8, length: usize) -> i32;
     #[cfg(feature = "control")]
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn axvisor_linux_control_create_fd_at(control_file: u64, result: usize) -> i32;
     fn axvisor_linux_control_create_fd(control_file: u64, mmap_area: u64) -> i32;
     #[cfg(feature = "control")]
     fn axvisor_linux_control_create_mmap_area(length: usize) -> u64;
@@ -162,23 +159,27 @@ impl HostIf for LinuxHost {
         // The per-CPU crate is linked into the core static library (the host
         // object is emitted standalone), so use its exported C shim here.
         unsafe { axvisor_linux_core_init_percpu_reg(cpu_id) };
-        unsafe { axvisor_linux_host_init_percpu() }
+        host_call::call(|| unsafe { axvisor_linux_host_init_percpu() })
     }
 
     #[cfg(feature = "shell")]
     fn exit(code: i32) -> ! {
-        unsafe { axvisor_linux_host_exit(code) }
+        host_call::call(|| unsafe { axvisor_linux_host_exit(code) })
     }
 }
 
 #[api_impl]
 impl ConsoleIf for LinuxHost {
     fn write_bytes(bytes: &[u8]) {
-        unsafe { axvisor_linux_console_write_bytes(bytes.as_ptr(), bytes.len()) }
+        host_call::call(|| unsafe {
+            axvisor_linux_console_write_bytes(bytes.as_ptr(), bytes.len())
+        })
     }
 
     fn read_bytes(bytes: &mut [u8]) -> usize {
-        unsafe { axvisor_linux_console_read_bytes(bytes.as_mut_ptr(), bytes.len()) }
+        host_call::call(|| unsafe {
+            axvisor_linux_console_read_bytes(bytes.as_mut_ptr(), bytes.len())
+        })
     }
 }
 
@@ -189,27 +190,14 @@ impl TimeIf for LinuxHost {
     }
 
     fn set_oneshot_timer(deadline: Duration) {
-        unsafe { axvisor_linux_time_set_oneshot_timer(deadline.as_nanos() as u64) }
+        host_call::call(|| unsafe {
+            axvisor_linux_time_set_oneshot_timer(deadline.as_nanos() as u64)
+        })
     }
 }
 
 #[api_impl]
 impl ArchIf for LinuxHost {
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn vhe_host_enter() -> ax_errno::AxResult<usize> {
-        let token = unsafe { axvisor_linux_vhe_enter() };
-        if token < 0 {
-            Err(ax_errno::AxError::Unsupported)
-        } else {
-            Ok(token as usize)
-        }
-    }
-
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn vhe_host_exit(token: usize) {
-        unsafe { axvisor_linux_vhe_exit(token) }
-    }
-
     #[cfg(target_arch = "aarch64")]
     fn hardware_inject_virtual_interrupt(_vector: u8) {
         panic!("Linux requires the vCPU-owned VHE interrupt queue");
@@ -237,8 +225,22 @@ impl ArchIf for LinuxHost {
 
     #[cfg(target_arch = "aarch64")]
     fn fetch_irq() -> u64 {
-        // Physical IRQ acknowledgement remains exclusively in Linux's GIC driver.
-        1023
+        // Peek at the physical Group 1 pending interrupt after Core restores
+        // the host EL2 context. HPPIR does not acknowledge the interrupt: Linux
+        // still owns IAR/EOIR and runs its handler when Core restores IRQs.
+        // A real host INTID lets Core classify the exit as ExternalInterrupt
+        // and reach yield_now(), including on PREEMPT_NONE hosts. Returning a
+        // constant spurious ID would keep timer/IPI exits in the Nothing loop.
+        // This snapshot is not an acknowledged interrupt-dispatch token.
+        let pending: u64;
+        unsafe {
+            core::arch::asm!(
+                "mrs {pending}, ICC_HPPIR1_EL1",
+                pending = out(reg) pending,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        pending & 0x00ff_ffff
     }
 
     #[cfg(any(
@@ -266,26 +268,30 @@ impl ArchIf for LinuxHost {
 #[api_impl]
 impl SyncIf for LinuxHost {
     fn create_wait_queue() -> usize {
-        unsafe { axvisor_linux_wait_queue_create() }
+        host_call::call(|| unsafe { axvisor_linux_wait_queue_create() })
     }
     fn destroy_wait_queue(queue: usize) {
-        unsafe { axvisor_linux_wait_queue_destroy(queue) }
+        host_call::call(|| unsafe { axvisor_linux_wait_queue_destroy(queue) })
     }
     fn wait_queue_wait(queue: usize) {
-        unsafe { axvisor_linux_wait_queue_wait(queue) }
+        host_call::call(|| unsafe { axvisor_linux_wait_queue_wait(queue) })
     }
     fn wait_queue_wait_until(queue: usize, condition: Box<dyn Fn() -> bool + Send + 'static>) {
         wait::wait_until(
             condition,
             || unsafe { axvisor_linux_wait_queue_generation(queue) },
-            |generation| unsafe { axvisor_linux_wait_queue_wait_since(queue, generation) },
+            |generation| {
+                host_call::call(|| unsafe {
+                    axvisor_linux_wait_queue_wait_since(queue, generation)
+                })
+            },
         );
     }
     fn wait_queue_wake_one(queue: usize) {
-        unsafe { axvisor_linux_wait_queue_wake_one(queue) }
+        host_call::call(|| unsafe { axvisor_linux_wait_queue_wake_one(queue) })
     }
     fn wait_queue_wake_all(queue: usize) {
-        unsafe { axvisor_linux_wait_queue_wake_all(queue) }
+        host_call::call(|| unsafe { axvisor_linux_wait_queue_wake_all(queue) })
     }
 }
 
@@ -308,19 +314,19 @@ impl TaskIf for LinuxHost {
         let registered_for_task = registered.clone();
         let holder: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(move || {
             while !registered_for_task.load(Ordering::Acquire) {
-                unsafe { axvisor_linux_task_yield() };
+                host_call::call(|| unsafe { axvisor_linux_task_yield() });
             }
             entry();
         }));
         let raw = Box::into_raw(holder) as *mut u8;
-        let id = unsafe {
+        let id = host_call::call(|| unsafe {
             axvisor_linux_spawn_task(
                 axvisor_linux_task_trampoline,
                 raw,
                 name.as_ptr(),
                 options.cpu_set.unwrap_or(0),
             )
-        };
+        });
         if id == 0 {
             unsafe {
                 drop(Box::from_raw(raw as *mut Box<dyn FnOnce() + Send>));
@@ -332,14 +338,14 @@ impl TaskIf for LinuxHost {
     }
     fn join_task(task: TaskHandle) {
         let raw: usize = unsafe { core::mem::transmute(task) };
-        unsafe { axvisor_linux_join_task(raw) }
+        host_call::call(|| unsafe { axvisor_linux_join_task(raw) })
     }
     fn current_task() -> Option<TaskHandle> {
         let raw = unsafe { axvisor_linux_current_task() };
         (raw != 0).then(|| unsafe { core::mem::transmute(raw) })
     }
     fn yield_now() {
-        unsafe { axvisor_linux_task_yield() }
+        host_call::call(|| unsafe { axvisor_linux_task_yield() })
     }
 }
 
@@ -353,6 +359,16 @@ extern "C" fn axvisor_linux_task_trampoline(raw: *mut u8) -> i32 {
 #[api_impl]
 impl IrqIf for LinuxHost {
     fn handle_irq(vector: usize) -> bool {
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        {
+            // fetch_irq() only peeks at HPPIR. Linux acknowledges and dispatches
+            // the physical IRQ after Core restores IRQs; a pending INTID must
+            // never be dispatched through Core's software IRQ registry as if
+            // it were an acknowledged interrupt. Core's external-exit path
+            // ignores this return value and still reaches its scheduling point.
+            let _ = vector;
+            return false;
+        }
         #[cfg(target_arch = "riscv64")]
         if vector == (1usize << (usize::BITS - 1)) + 1 {
             let flags = unsafe { axvisor_linux_irq_local_save() };
@@ -388,6 +404,7 @@ impl IrqIf for LinuxHost {
         } {
             return true;
         }
+        #[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
         handle_registered_irq(vector)
     }
     fn register_irq_handler(vector: usize, handler: IrqHandler) -> bool {
@@ -433,24 +450,32 @@ pub extern "C" fn axvisor_linux_handle_registered_irq(vector: usize) -> bool {
 #[api_impl]
 impl MemoryIf for LinuxHost {
     fn alloc_frame() -> Option<PhysAddr> {
-        let addr = unsafe { axvisor_linux_memory_alloc_frame() };
+        let addr = host_call::call(|| unsafe { axvisor_linux_memory_alloc_frame() });
         (addr != 0).then(|| PhysAddr::from_usize(addr))
     }
     fn alloc_contiguous_frames(num_frames: usize, frame_align: usize) -> Option<PhysAddr> {
-        let addr = unsafe { axvisor_linux_memory_alloc_contiguous(num_frames, frame_align) };
+        let addr = host_call::call(|| unsafe {
+            axvisor_linux_memory_alloc_contiguous(num_frames, frame_align)
+        });
         (addr != 0).then(|| PhysAddr::from_usize(addr))
     }
     fn dealloc_frame(addr: PhysAddr) {
-        unsafe { axvisor_linux_memory_dealloc_frame(addr.as_usize()) }
+        host_call::call(|| unsafe { axvisor_linux_memory_dealloc_frame(addr.as_usize()) })
     }
     fn dealloc_contiguous_frames(addr: PhysAddr, num_frames: usize) {
-        unsafe { axvisor_linux_memory_dealloc_contiguous(addr.as_usize(), num_frames) }
+        host_call::call(|| unsafe {
+            axvisor_linux_memory_dealloc_contiguous(addr.as_usize(), num_frames)
+        })
     }
     fn phys_to_virt(addr: PhysAddr) -> VirtAddr {
-        VirtAddr::from_usize(unsafe { axvisor_linux_memory_phys_to_virt(addr.as_usize()) })
+        VirtAddr::from_usize(host_call::call(|| unsafe {
+            axvisor_linux_memory_phys_to_virt(addr.as_usize())
+        }))
     }
     fn virt_to_phys(addr: VirtAddr) -> PhysAddr {
-        PhysAddr::from_usize(unsafe { axvisor_linux_memory_virt_to_phys(addr.as_usize()) })
+        PhysAddr::from_usize(host_call::call(|| unsafe {
+            axvisor_linux_memory_virt_to_phys(addr.as_usize())
+        }))
     }
 }
 
@@ -463,7 +488,7 @@ impl control::ControlIf for LinuxHost {
             return Err(AxError::AlreadyExists);
         }
         *registered = Some(ops);
-        if unsafe { axvisor_linux_control_register_endpoint() } != 0 {
+        if host_call::call(|| unsafe { axvisor_linux_control_register_endpoint() }) != 0 {
             *registered = None;
             return Err(AxError::Io);
         }
@@ -475,28 +500,21 @@ impl control::ControlIf for LinuxHost {
         _ops: ControlOps,
         mmap_area: Option<control::MmapAreaId>,
     ) -> AxResult<control::Fd> {
-        let fd = unsafe { axvisor_linux_control_create_fd(control_file, mmap_area.unwrap_or(0)) };
+        let fd = host_call::call(|| unsafe {
+            axvisor_linux_control_create_fd(control_file, mmap_area.unwrap_or(0))
+        });
         (fd >= 0).then_some(fd).ok_or(AxError::Io)
     }
 
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    fn create_user_fd_at(control_file: u64, _ops: ControlOps, user_address: usize) -> AxResult {
-        match unsafe { axvisor_linux_control_create_fd_at(control_file, user_address) } {
-            0 => Ok(()),
-            -14 => Err(AxError::BadAddress),
-            -12 => Err(AxError::NoMemory),
-            _ => Err(AxError::Io),
-        }
-    }
-
     fn get_user_fd_ref(fd: control::Fd) -> AxResult<control::UserFdRefId> {
-        let id = unsafe { axvisor_linux_control_get_fd_ref(fd) };
+        let id = host_call::call(|| unsafe { axvisor_linux_control_get_fd_ref(fd) });
         (id != 0).then_some(id).ok_or(AxError::BadFileDescriptor)
     }
 
     fn write_user_fd_ref(user_fd_ref: control::UserFdRefId, buf: &[u8]) -> AxResult<usize> {
-        let ret =
-            unsafe { axvisor_linux_control_write_fd_ref(user_fd_ref, buf.as_ptr(), buf.len()) };
+        let ret = host_call::call(|| unsafe {
+            axvisor_linux_control_write_fd_ref(user_fd_ref, buf.as_ptr(), buf.len())
+        });
         if ret >= 0 {
             Ok(ret as usize)
         } else if ret == -(11isize) {
@@ -509,8 +527,9 @@ impl control::ControlIf for LinuxHost {
     }
 
     fn read_user_fd_ref(user_fd_ref: control::UserFdRefId, buf: &mut [u8]) -> AxResult<usize> {
-        let ret =
-            unsafe { axvisor_linux_control_read_fd_ref(user_fd_ref, buf.as_mut_ptr(), buf.len()) };
+        let ret = host_call::call(|| unsafe {
+            axvisor_linux_control_read_fd_ref(user_fd_ref, buf.as_mut_ptr(), buf.len())
+        });
         if ret >= 0 {
             Ok(ret as usize)
         } else if ret == -(11isize) {
@@ -523,41 +542,45 @@ impl control::ControlIf for LinuxHost {
     }
 
     fn release_user_fd_ref(user_fd_ref: control::UserFdRefId) -> AxResult {
-        let ret = unsafe { axvisor_linux_control_release_fd_ref(user_fd_ref) };
+        let ret = host_call::call(|| unsafe { axvisor_linux_control_release_fd_ref(user_fd_ref) });
         (ret == 0).then_some(()).ok_or(AxError::BadFileDescriptor)
     }
 
     fn create_mmap_area(len: usize) -> AxResult<control::MmapAreaId> {
-        let area = unsafe { axvisor_linux_control_create_mmap_area(len) };
+        let area = host_call::call(|| unsafe { axvisor_linux_control_create_mmap_area(len) });
         (area != 0).then_some(area).ok_or(AxError::NoMemory)
     }
 
     fn read_mmap_area(area: control::MmapAreaId, offset: usize, buf: &mut [u8]) -> AxResult {
-        let ret = unsafe {
+        let ret = host_call::call(|| unsafe {
             axvisor_linux_control_read_mmap_area(area, offset, buf.as_mut_ptr(), buf.len())
-        };
+        });
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
     fn write_mmap_area(area: control::MmapAreaId, offset: usize, buf: &[u8]) -> AxResult {
-        let ret =
-            unsafe { axvisor_linux_control_write_mmap_area(area, offset, buf.as_ptr(), buf.len()) };
+        let ret = host_call::call(|| unsafe {
+            axvisor_linux_control_write_mmap_area(area, offset, buf.as_ptr(), buf.len())
+        });
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
     fn release_mmap_area(area: control::MmapAreaId) -> AxResult {
-        let ret = unsafe { axvisor_linux_control_release_mmap_area(area) };
+        let ret = host_call::call(|| unsafe { axvisor_linux_control_release_mmap_area(area) });
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
     fn copy_from_user(addr: usize, buf: &mut [u8]) -> AxResult {
-        let ret =
-            unsafe { axvisor_linux_control_copy_from_user(buf.as_mut_ptr(), addr, buf.len()) };
+        let ret = host_call::call(|| unsafe {
+            axvisor_linux_control_copy_from_user(buf.as_mut_ptr(), addr, buf.len())
+        });
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
     fn copy_to_user(addr: usize, buf: &[u8]) -> AxResult {
-        let ret = unsafe { axvisor_linux_control_copy_to_user(addr, buf.as_ptr(), buf.len()) };
+        let ret = host_call::call(|| unsafe {
+            axvisor_linux_control_copy_to_user(addr, buf.as_ptr(), buf.len())
+        });
         (ret == 0).then_some(()).ok_or(AxError::BadAddress)
     }
 
@@ -573,12 +596,13 @@ impl control::ControlIf for LinuxHost {
     }
 
     fn retain_current_user_address_space() -> AxResult<control::UserAddressSpaceId> {
-        let id = unsafe { axvisor_linux_control_retain_user_address_space() };
+        let id = host_call::call(|| unsafe { axvisor_linux_control_retain_user_address_space() });
         (id != 0).then_some(id).ok_or(AxError::BadState)
     }
 
     fn release_user_address_space(id: control::UserAddressSpaceId) -> AxResult {
-        let ret = unsafe { axvisor_linux_control_release_user_address_space(id) };
+        let ret =
+            host_call::call(|| unsafe { axvisor_linux_control_release_user_address_space(id) });
         (ret == 0).then_some(()).ok_or(AxError::BadState)
     }
 
@@ -595,7 +619,7 @@ impl control::ControlIf for LinuxHost {
             .ok_or(AxError::InvalidInput)?;
         let mut pages = alloc::vec![0u64; max_pages];
         let mut count = 0usize;
-        let id = unsafe {
+        let id = host_call::call(|| unsafe {
             axvisor_linux_control_pin_user_pages(
                 user_address_space,
                 addr,
@@ -605,13 +629,13 @@ impl control::ControlIf for LinuxHost {
                 pages.len(),
                 &mut count,
             )
-        };
+        });
         if id == 0 {
             return Err(AxError::BadAddress);
         }
         pages.truncate(count);
         Ok(PinnedUserPages {
-            id: id as u64,
+            id,
             pages: pages
                 .into_iter()
                 .map(|page| PhysAddr::from_usize(page as usize))
@@ -620,7 +644,7 @@ impl control::ControlIf for LinuxHost {
     }
 
     fn release_pinned_user_pages(id: control::PinnedUserPagesId) -> AxResult {
-        let ret = unsafe { axvisor_linux_control_release_pinned_pages(id) };
+        let ret = host_call::call(|| unsafe { axvisor_linux_control_release_pinned_pages(id) });
         (ret == 0).then_some(()).ok_or(AxError::BadState)
     }
 }

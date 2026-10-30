@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Build the freestanding Rust domain and its ARM64 Linux host, out of tree."""
 import argparse
-import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
-import tomllib
 
 
 def run(args, **kwargs):
@@ -18,8 +16,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', required=True, type=Path)
     p.add_argument('--config', required=True, type=Path)
-    p.add_argument('--core', type=Path, help='optional local shared-Core checkout')
-    p.add_argument('--features', default='arm-vhe,conformance-test')
+    p.add_argument('--features', default='arm-vhe,control')
     p.add_argument('--cross-compile', default='aarch64-linux-gnu-')
     p.add_argument('--jobs', type=int, default=6)
     a = p.parse_args()
@@ -31,28 +28,11 @@ def main():
     env['CARGO_TARGET_DIR'] = str(out / 'rust')
     env['RUSTFLAGS'] = '-C opt-level=2 -C panic=abort -C relocation-model=static -C force-unwind-tables=no'
     cargo = ['cargo']
-    if a.core:
-        core = a.core.resolve()
-        lock = tomllib.loads((rust / 'Cargo.lock').read_text())
-        names = {pkg['name'] for pkg in lock['package']
-                 if pkg.get('source', '').startswith('git+https://github.com/numpy1314/tgoskits')}
-        # Include direct roots when a previous local build removed git source entries.
-        names |= {'axvisor_api', 'axvisor_core', 'axvisor_conformance', 'ax-errno', 'ax-percpu', 'arm_vcpu'}
-        lines = ['[patch."https://github.com/numpy1314/tgoskits"]']
-        for manifest in sorted(core.rglob('Cargo.toml')):
-            package = tomllib.loads(manifest.read_text()).get('package', {})
-            if package.get('name') in names:
-                lines.append(f'{package["name"]} = {{ path = {json.dumps(str(manifest.parent))} }}')
-        patch = out / 'core-local.toml'
-        patch.write_text('\n'.join(lines) + '\n')
-        cargo += ['--config', str(patch)]
-    common = ([] if a.core else ['--locked']) + ['-Z', 'json-target-spec', '-Z', 'build-std=core,alloc,compiler_builtins',
+    common = ['--locked', '-Z', 'json-target-spec', '-Z', 'build-std=core,alloc,compiler_builtins',
               '--target', 'targets/aarch64-linux-kernel.json', '--release']
     objects = out / 'drivers/virt/axvisor'
     objects.mkdir(parents=True, exist_ok=True)
     host_features = ','.join(f for f in a.features.split(',') if f in ('control', 'shell', 'arm-vhe'))
-    if 'vhe-selftest' in a.features.split(',') and 'arm-vhe' not in host_features:
-        host_features = ','.join(filter(None, [host_features, 'arm-vhe']))
     host = objects / 'axvisor_linux_host.o'
     run(cargo + ['rustc', '-p', 'axvisor-linux-host'] + common
         + (['--features', host_features] if host_features else [])
@@ -70,7 +50,6 @@ def main():
     run(make + [f'KCONFIG_ALLCONFIG={a.config.resolve()}', 'allnoconfig'], env=env)
     run([linux / 'scripts/config', '--file', out / '.config', '-e', 'AXVISOR_LINUX_BRIDGE',
          '-e' if ('arm-vhe' in host_features) else '-d', 'AXVISOR_ARM64_VHE',
-         '-e' if 'vhe-selftest' in a.features.split(',') else '-d', 'AXVISOR_ARM64_VHE_SELFTEST',
          '-e' if 'conformance-test' in a.features.split(',') else '-d', 'AXVISOR_LINUX_CONFORMANCE',
          '-e' if 'control' in a.features.split(',') else '-d', 'AXVISOR_LINUX_CONTROL'])
     run(make + ['olddefconfig'], env=env)

@@ -11,10 +11,9 @@ crate-type = ["staticlib"]
 [features]
 default = []
 control = ["axvisor_api/control", "axvisor_core/control"]
-# Keep dependency resolution valid for the unchanged x86 Core. The build
-# script diagnoses the outstanding Linux ARM ownership-boundary integration.
+ept-level-4 = ["axvisor_core/ept-level-4"]
+# Linux-owned VHE boundary; the unchanged shared Core detects VHE at runtime.
 arm-vhe = []
-vhe-selftest = ["arm-vhe", "dep:arm_vcpu"]
 shell = ["axvisor_api/shell", "axvisor_core/shell"]
 sstc = ["axvisor_core/sstc"]
 svm = ["axvisor_core/svm"]
@@ -27,4 +26,3 @@ axvisor_api = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780f
 axvisor-linux-conformance = { path = "../axvisor-linux-conformance", optional = true }
 ax-percpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", features = ["custom-base", "external-base"] }
 log = "0.4"
-arm_vcpu = { git = "https://github.com/Ivans-11/tgoskits", rev = "4152c3e780feb5e44241fb3fa143fe04bdca0181", optional = true }

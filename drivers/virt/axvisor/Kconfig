@@ -27,16 +27,20 @@ config AXVISOR_LINUX_CONTROL
 
 config AXVISOR_ARM64_VHE
 	bool "AxVisor Linux VHE ownership boundary"
-	depends on ARM64 && AXVISOR_LINUX_BRIDGE && !KVM && ARM64_4K_PAGES
+	depends on ARM64 && AXVISOR_LINUX_CONTROL && !KVM && ARM64_4K_PAGES
+	depends on KERNEL_MODE_NEON && !ARM64_PSEUDO_NMI
 	default n
 	help
-	  Requires the Rust arm-vhe feature and a DT GICv3 host at EL2.
-	  Admission fails before publishing the control endpoint on other hosts.
-
-config AXVISOR_ARM64_VHE_SELFTEST
-	bool "Run the shared VHE world-switch smoke gates"
-	depends on ARM64 && AXVISOR_LINUX_BRIDGE && !KVM && ARM64_4K_PAGES
-	default n
+	  Requires the Rust arm-vhe feature, Linux 6.12 schedulable kernel SIMD,
+	  and a DT GICv3 host running Linux at EL2. The guest CPU pool must have
+	  identical CPU profiles; set axvisor_linux.guest_cpus and userspace
+	  affinity explicitly on heterogeneous hosts. Each control ioctl stays
+	  on its entry CPU while permitting scheduling. Native KVM, CPU hotplug,
+	  pseudo-NMI, SME, MTE and POE are not supported in this profile.
+	  This candidate supports the control endpoint;
+	  the direct static-VM boot path is not admitted. Kernel SIMD ownership
+	  remains schedulable while Core protects each guest-switch batch.
+	  Admission fails before publishing the endpoint on unsupported hosts.
 
 config AXVISOR_LINUX_CONFORMANCE
 	bool "AxVisor host-contract conformance runner"
