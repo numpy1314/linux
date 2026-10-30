@@ -1,10 +1,13 @@
 # ARM Linux 适配：从 x86 实现解释到 ARM 行为对照
 
-审计日期：2026-10-30。本轮是源码审计，没有新增运行结果，也没有修改 Core。
+原始审计日期：2026-10-30。下面的固定对象、四方表和第 1–7 节保留为当时的
+源码审计快照，使用原样 Core 4152；其中“当前”“候选”和行号均指该固定版本。
+该次审计没有新增运行结果，也没有修改 Core。后续共享 Core 的实施范围另列于
+第 8 节；旧快照中的缺失能力和阻塞项不能直接当成新版本的现状。
 
 ## 固定比较对象
 
-| 对象 | 本轮版本 |
+| 对象 | 原始审计固定版本 |
 | --- | --- |
 | 产品 x86 Linux | `TesseraHypervisor/linux`，`e725a24a0ec62b97a5a7476f102aba268a7682aa`，实际读取该提交的代码 |
 | 共享 Core | `Ivans-11/tgoskits`，`4152c3e780feb5e44241fb3fa143fe04bdca0181` |
@@ -28,7 +31,7 @@
 
 ## 四方对照
 
-| 路径 | 原生 x86 KVM | 产品 x86 | 原生 ARM KVM | 当前 ARM 候选及结论 |
+| 路径 | 原生 x86 KVM | 产品 x86 | 原生 ARM KVM | 原始 ARM 候选及结论 |
 | --- | --- | --- | --- | --- |
 | 运行边界 | 在进入/退出 guest 的局部窗口保护抢占与 IRQ，外层可调度 | ioctl 直接进入 Core；VMX 在 Core 的 IRQ 保护批次内 bind/run/unbind | 局部保护 VMID、VGIC 和 guest 切换，退出后恢复宿主 | 继续复用 Core 的切换边界；整个 KVM_RUN 关中断不可接受 |
 | CPU 迁移 | load/put 加调度 notifier 维护 CPU 状态 | VMX 每批次重新绑定当前 CPU；adapter 未禁止整次 ioctl 迁移 | 使用同一 notifier 框架，并处理 VGIC、timer、FP 等状态 | 候选整次 control ioctl 禁止迁移是新增限制，不能称 VHE 必然要求或 KVM 等价 |
@@ -108,7 +111,7 @@ adapter 看不到被 Core 消化的 HVC RESET，也无法撤回 Core 已执行�
 
 Core ARM `C:virtualization/axvisor_core/src/kvm/device.rs:67` 先 create_user_fd，copyout 失败时 `:74` 仅关闭 Core device id，没有回收已安装 Linux FD 的对应接口。候选 `L:drivers/virt/axvisor/axvisor_runtime.c:146`、`:673` 通过任务局部事务先保留 FD、成功后发布、失败则释放未发布 file/FD，补偿两层对象生命周期不一致。应把它作为有明确失败路径依据的 ARM 增量单独维护，而不是称为“完全照搬 x86/KVM”。
 
-## 下一步与验收依据
+## 原始审计的下一步与验收依据
 
 | 类别 | 处理决定 | 要观察的证据 |
 | --- | --- | --- |
@@ -117,4 +120,75 @@ Core ARM `C:virtualization/axvisor_core/src/kvm/device.rs:67` 先 create_user_fd
 | 新增限制/策略 | 先论证再决定缩小 ioctl 迁移保护范围、watchdog 覆盖范围与周期 | 同一次 KVM_RUN 中迁移、信号打断、长跑 guest、事件到达延迟、额外唤醒成本 |
 | 共享 Core 边界 | 单列 control kick/WFI、PSCI 事件和 SMC 策略；不在 adapter 伪装已完成 | 原始请求如何传递、目标 vCPU 如何退出、全 VM 如何停止；没有接口则明确阻塞 |
 
-继续以 Core `4152c3e…` 原样版本为约束。保留既有 QEMU 结果的适用范围；本次源码审计不增加通过项，不启动实板候选。后续每次逻辑提交应同时记录四方依据、必要性、差异和针对性验证结果。
+当时以 Core `4152c3e…` 原样版本为约束。既有 QEMU 结果仅适用于其原版本；该次源码审计不增加通过项，也未启动实板候选。后续每次逻辑提交应同时记录四方依据、必要性、差异和针对性验证结果。
+
+## 8. 后续实施范围：共享 Core 的 ARM PSCI 生命周期
+
+Linux 的 x86/ARM 依赖统一锁定 `numpy1314/tgoskits` 的
+`ce800d4d28fd552441f166c2679f63f8b14d121c`。它在原始
+`4152c3e780feb5e44241fb3fa143fe04bdca0181` 上增加六个提交，依次处理 ARM
+固件调用隔离与离线 CPU 复位、共享控制入口/停止协议、ARM PSCI 生命周期、
+可接受的 preferred-target 配置、仅服务停止/信号的等待接口，以及
+SYSTEM_EVENT_DATA 能力查询。没有单独的 ARM Core pin 或本地路径覆盖。
+本节记录源码契约和剩余边界，不添加运行结果、功能通过或性能结论。
+
+Firecracker v1.10.1 的收尾同步应按真实顺序理解：先给各 vCPU 投递 Finish，
+再发送宿主信号；信号使 Core 的运行循环或可中断等待返回 EINTR，回到用户态
+后 handler 才能设置 immediate_exit，vCPU 状态机随后消费 Finish。
+VcpuHandle::Drop 的 join 完成后 VMM 才继续销毁。它不等待单独的 all-stop 通知。
+Linux 的 ioctl/VMA file 引用保证活动 RUN 的 vCPU file 不会先被 release；
+Core 又在最后 vCPU file 释放前保留 VM slots，最终先取消并 join irqfd，再
+撤销映射、释放 pinned pages 和页表。仅凭一行退出或清理日志不能代替这些条件。
+
+`tools/axvisor/tests/arm64-firecracker-stop/` 单独覆盖 Finish 对忙循环的打断：
+通过有意的非 PSCI UNKNOWN 退出触发 VMM stop，避免 Core 的同步系统事件
+停止扩展提前替 VMM 停住另一个 vCPU；同时覆盖分核和共享宿主 CPU。
+该用例不是 PSCI 正常退出或 guest 错误退出码的语义验收。
+
+本轮优先完成 Firecracker 的退出链路：准确上报 OFF/RESET、隔离物理固件，
+由 VMM 发起 stop，使 KVM_RUN 退出、线程 join 和 VM 回收完成。Firecracker
+不以 Core 的全 vCPU 同步停止通知作为开始退出的前提。已经实现的同步停止
+保留为独立扩展并单独验收；完整 native PSCI、定时器 deadline 和全 VM
+原地重建不作为该 Firecracker 生命周期的当前门槛。
+
+| 路径 | 对照依据与职责选择 | 本次实现 |
+| --- | --- | --- |
+| HVC/SMC 分派 | 原生 ARM 在架构后端识别调用，再由 PSCI/frontend 决定 VM 行为；4152 的物理 SMC fallback 早于 adapter 可见边界 | `arm_vcpu/src/exception.rs` 将 PSCI 统一报告为现有 Hypercall，未知 SMC 和不支持的 SMC immediate 返回 -1，不向物理固件透传。非 PSCI 私有 HVC 保留原分派；未增加公共 exit 枚举 |
+| OFF/RESET 用户态 ABI | 原生 x86 triple fault 的 SHUTDOWN 与原生 ARM PSCI 的 SYSTEM_EVENT 含义不同，复用职责不能照搬编码 | ARM control frontend 输出 `KVM_EXIT_SYSTEM_EVENT`，OFF/RESET 分别使用 SHUTDOWN/RESET 类型，`ndata=1`、`data[0]=0`；x86 SystemDown 映射不变 |
+| 全 VM 停止扩展 | 原生 `kvm_prepare_system_event` 停止各 vCPU 并发出请求；原 x86 adapter 的普通 ioctl 转发本身不提供 ARM 同步停止协议；这不是 Firecracker 发起 stop/join 的前提 | Core 在共享锁内发布所有 vCPU 的 STOPPED、取消待处理 CPU_ON；每次真实 entry 检查 gate，包含内部重入；Linux 同步 IPI 确认运行 CPU 已回到 host 后才返回系统事件。周期 watchdog 不承担此完成条件 |
+| STOPPED 与恢复 | 原生 ARM 区分电源状态与 VM 对象销毁；事件返回前在 x0 预置 INTERNAL_FAILURE | CPU_OFF 和系统事件停止后，KVM_RUN 可被信号打断；不自行重启 guest。系统事件源 x0 为 -6，用户态显式置 RUNNABLE 后会从原调用后的上下文继续；这不是整 VM 复位 |
+| CPU_ON | 原生 ARM 在目标 vCPU 上处理待复位状态；PSCI 0.2 对已运行目标返回 ALREADY_ON | 启动请求在与全 VM 停止相同的锁内排队，目标 runner 应用复位；参数有效时，已运行或已排队目标返回 -4，非法或未初始化目标返回 -2。源已 STOPPED 时拒绝旧请求，防止并发系统停止后重新拉起目标 |
+| 寄存器访问顺序 | 原生 `arch/arm64/kvm/arm.c` 在 GET/SET_ONE_REG 前消费待处理 PSCI reset | Core 同样先处理 pending reset，再读写寄存器；GET_REG_LIST 不触发复位。目标的寄存器、FP、系统寄存器和定时器状态复位，保留 MPIDR、stage-2 配置和 counter offset |
+| 初始化与版本 | 需要区分所声明版本与实际实现的函数集合 | preferred target 推荐 `KVM_ARM_VCPU_PSCI_0_2`；初次 INIT 要求该位并按 POWER_OFF 设置状态。PSCI_VERSION 和版本 one-reg 固定为 0.2；不接受 1.x 版本写入 |
+
+实现文件位于共享 Core 的 `virtualization/` 下：`arm_vcpu/src/{exception,smc,vcpu}.rs`
+处理架构边界；`axvisor_api/src/control.rs` 定义当前 CPU、同步 kick 和可中断等待
+接口；`axvisor_core/src/kvm/{state,mod,vcpu,vm}.rs` 与 `run/{mod,arm64}.rs`
+管理电源状态、排队复位和 KVM ABI；`arch/aarch64.rs` 解码 PSCI，`vmm/vcpus.rs`
+为 static frontend 保留基本 CPU_ON/CPU_OFF/poweroff 用途。static 不因此取得
+完整的 control 生命周期功能，Linux 的直接 static VM 启动仍不在支持范围内。
+
+当前仍有明确差异，不能写成“完整 PSCI 0.2 / 原生 KVM 等价”：
+
+- 已实现 VERSION、CPU_OFF、CPU_ON、AFFINITY_INFO、MIGRATE_INFO_TYPE、
+  SYSTEM_OFF 和 SYSTEM_RESET。CPU_SUSPEND、PSCI_FEATURES、RESET2 未实现，
+  返回 NOT_SUPPORTED；timer-aware suspend 与完整 WFI/idle 协议仍是后续工作。
+- 重复 `KVM_ARM_VCPU_INIT` 明确拒绝。系统事件不自动重建寄存器、RAM、设备、
+  VGIC 或 VMM 状态；本批不提供全 VM 原地重建。不能把一次 OFF/RESET 的准确
+  事件上报当成 guest 完整重启。
+- CPU_ON 在发布成功前要求入口 PC 四字节对齐，否则返回 INVALID_PARAMS。
+  Linux 6.12 原生 `kvm_psci_vcpu_on` 不做这项预检查；这是当前后端不提供相应
+  指令对齐异常注入时的限制，不能说成原生必需条件。
+- `SET_MP_STATE` 不取得 KVM_RUN 持有的 operation lock，可从另一线程异步
+  stop/wake。原生 6.12 的普通 vCPU ioctl 在 `virt/kvm/kvm_main.c` 的 vCPU
+  mutex 内串行，ARM 的该 ioctl 不走 async 分支；产品接受的并发方式更宽。
+- 整次 ioctl 禁止迁移、irqfd 阻塞读线程、non-x86 整槽 pin 及 WFI 限制没有
+  因本批 PSCI 修正消失。watchdog 已缩至运行 CPU 的引用计数范围，默认 5 ms；
+  `axvisor_linux.watchdog=0` 只关闭周期 hrtimer，仍保留 guest virtual-timer PPI。
+
+因此第 6 节的“HVC RESET 不支持、SMC RESET 可达物理固件”只描述原始快照。
+新实现的验收入口见 [ARM64_NEXT_VALIDATION.md](../../../tools/axvisor/ARM64_NEXT_VALIDATION.md)：
+优先核对 Firecracker OFF/RESET 后的 stop/join/回收，包含其他 vCPU 仍忙循环
+的情况；另用隔离 QEMU 的 HVC/SMC 微型 guest 核对 ABI、CPU_ON 和同步全 VM
+停止扩展，特别在 `watchdog=0` 下验证定向 kick 不依赖周期退出。完成相应用例
+后再进入实板验证。文档中的用例不是执行结果，也不转移旧版本的验收状态。

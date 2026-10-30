@@ -3,32 +3,40 @@
 For the x86-product/native-KVM/ARM comparison and the evidence required before
 further adapter changes, see [ARM64_KVM_COMPARISON.md](ARM64_KVM_COMPARISON.md).
 
-The Linux adapter pins every tgoskits dependency to the unmodified x86
-reference revision:
+The Linux adapter pins every tgoskits dependency, for both x86 and ARM, to
+one shared revision:
 
-`https://github.com/Ivans-11/tgoskits` at
-`4152c3e780feb5e44241fb3fa143fe04bdca0181`.
+`https://github.com/numpy1314/tgoskits` at
+`ce800d4d28fd552441f166c2679f63f8b14d121c`.
 
-This is the commit selected by the `ivans/tessera` Linux branch's Cargo.lock
-when checked on 2026-10-30 (Linux revision
-`e725a24a0ec62b97a5a7476f102aba268a7682aa`).
+This revision contains six commits on top of
+`4152c3e780feb5e44241fb3fa143fe04bdca0181`, the original x86 reference selected
+by the `ivans/tessera` Linux branch's Cargo.lock on 2026-10-30 (Linux revision
+`e725a24a0ec62b97a5a7476f102aba268a7682aa`). The additions cover ARM firmware
+call isolation and offline CPU reset, the shared control entry/stop contract,
+ARM PSCI lifecycle handling, the supported preferred-target profile, the
+stop/signal-only wait interface, and ARM system-event data discovery.
+The comparison document preserves the original four-way audit as a fixed
+historical snapshot and records this implementation separately.
 Use the fixed revision rather than following the moving `axvisor-core` branch.
-Do not introduce a patched Core, a path override, or a second ARM Core version.
+Do not introduce a path override or a second, ARM-only Core version.
 
 The earlier irqfd wait/cancel API experiment has been reverted. Its component
 tests and reported results do not establish correctness for this baseline.
 The existing Core irqfd listener, yield, cancellation-write and join behavior
 remain unchanged.
 
-This revision already unmaps an eagerly pinned memory slot as one GPA range
-before releasing its pinned pages and address-space reference. The previous
+The inherited 4152 implementation already unmaps an eagerly pinned memory slot
+as one GPA range before releasing its pinned pages and address-space reference.
+The previous
 `f6c897bc10582089bb5b8bb9a06a6d85b84c69dc` baseline unmapped it page by page.
 The shared implementation is used without an ARM-only teardown patch. This
 source-level improvement does not establish Linux ARM runtime correctness.
 
 ## Linux ARM VHE ownership
 
-The adapter now uses the shared Core's existing APIs. The old ARM-only
+The adapter uses the shared Core APIs, including the new ARM control-entry,
+synchronous kick and interruptible-wait contract. The old ARM-only
 `vhe_host_enter`, `vhe_host_exit`, `create_user_fd_at` and `vhe-selftest`
 dependencies have been removed. `arm-vhe` is a Linux adapter feature, not a
 second Core implementation. The builder always uses the locked dependency
@@ -65,6 +73,13 @@ does not program a timer; it is not a guarantee that `KVM_RUN` returns to
 userspace within 5 ms. The unmigrated direct-VM timer-injection callback remains
 an explicit unsupported path, not a silent no-op.
 
+`axvisor_linux.watchdog=0` disables that periodic hrtimer for focused entry/stop
+validation; it does not disable the guest virtual-timer PPI. The default is
+`watchdog=1`. System-event stopping uses the Core's entry gate and a synchronous
+Linux IPI acknowledgement, independently of the periodic exit budget. This
+contract must also hold for a guest that masks its own IRQs and never exits
+voluntarily.
+
 Set `axvisor_linux.guest_cpus=4-7` for the initial RK3588 A76 pool, and set the
 whole VMM process's affinity to that pool before any control ioctl. The default
 pool is all online CPUs, which will be rejected on a heterogeneous system.
@@ -93,34 +108,66 @@ initialization begins retain possibly referenced memory until reboot; only
 the adapter endpoints and VHE PPI registration are withdrawn. There is no
 claim of a complete Core shutdown/unload implementation.
 
-## Known functional boundary
+## ARM PSCI lifecycle contract and remaining limits
 
-The fixed revision's HVC PSCI `SYSTEM_RESET` request is not implemented by the
-shared KVM frontend. `arm_vcpu::handle_psci_call` leaves it as a `Hypercall`;
-`axvisor_core::kvm::run::arm64::handle_psci_hypercall` returns `NOT_SUPPORTED`
-and the `KVM_RUN` loop continues. None of the existing host callbacks exposes
-that request's function number. Translating a later guest halt, console line
-or signal into a successful reset would hide this missing behavior and is
-not done by the adapter.
+The immediate Firecracker scope is accurate OFF/RESET reporting, guest firmware
+isolation, and VMM-driven stop, KVM_RUN interruption, thread join and resource
+release. Firecracker does not require a separate all-vCPU-stopped notification
+before starting that exit sequence. The synchronous system-stop behavior below
+is a retained extension with its own validation cases. Timer-aware suspend and
+full VM reset are not prerequisites for this Firecracker exit path.
 
-`SYSTEM_OFF` follows the shared `SystemDown` path and currently produces
-`KVM_EXIT_SHUTDOWN`, which Firecracker accepts. This is distinct from the
-native ARM KVM `KVM_EXIT_SYSTEM_EVENT` shutdown/reset ABI. Successful poweroff
-and resource cleanup do not establish restart support or complete KVM ABI
-compatibility. Keep the restart test failing until the shared Core contract
-supports the required exit; do not substitute a private ARM Core patch.
+The shared ARM backend now forwards HVC/SMC PSCI requests through the existing
+`Hypercall` exit to the selected frontend. It no longer forwards unhandled
+guest SMC requests to physical firmware. Unsupported PSCI functions, unknown
+SMC functions and unsupported SMC immediates return `NOT_SUPPORTED` (-1).
+Non-PSCI private HVCs retain their previous dispatch. There is no new public
+exit enum, and the x86 `SystemDown` to `KVM_EXIT_SHUTDOWN` mapping is unchanged.
 
-The SMC conduit has an additional board-validation blocker. Core sets
-`HCR_EL2.TSC`, traps the guest SMC, and first checks `handle_psci_call`.
-Because `SYSTEM_RESET` is not handled there, `handle_smc64_exception` forwards
-the request through a real `smc #0` with the guest's arguments. On a board
-whose EL3 firmware implements that PSCI request, guest code could therefore
-reset the physical host. `SYSTEM_OFF` is intercepted before that fallback.
-This is a source-level finding, not an intentional board-reset experiment.
-It also applies when the normal guest DT selects HVC: guest EL1 code can
-still execute SMC. The existing adapter callbacks cannot intercept this
-path. Do not boot this candidate on the board as a completed isolation
-implementation; resolve the shared Core PSCI contract before board admission.
+In the ARM KVM control frontend, `SYSTEM_OFF` and `SYSTEM_RESET` produce
+`KVM_EXIT_SYSTEM_EVENT`, with shutdown/reset type respectively, `ndata=1` and
+`data[0]=0`. Before returning the event, Core publishes STOPPED for every vCPU
+in the VM, cancels pending CPU starts, and synchronously kicks active runners.
+The entry gate is checked at every actual guest entry, including internal
+re-entry loops. The originating x0 is set to `INTERNAL_FAILURE` (-6), matching
+native KVM's behavior if userspace explicitly resumes the stopped context.
+A subsequent `KVM_RUN` of a STOPPED vCPU waits interruptibly; it does not itself
+restart or rebuild the VM. No adapter callback powers off or resets the host
+on behalf of these guest requests.
+
+`CPU_OFF` enters STOPPED. `CPU_ON` queues a reset for the target runner, which
+resets its architectural state before entry. `GET_ONE_REG` and `SET_ONE_REG`
+also consume a pending reset before accessing registers, as in native ARM
+KVM. For valid startup arguments, a runnable or already queued target returns
+`ALREADY_ON` (-4); an invalid or uninitialized target returns `INVALID_PARAMS`
+(-2). A concurrent system
+stop prevents an older source `CPU_ON` from restarting another vCPU. This
+backend requires a four-byte-aligned entry PC and rejects an unaligned PC
+before queueing; Linux 6.12 native KVM does not perform this upfront check.
+
+The current profile reports PSCI 0.2 and implements VERSION, CPU_OFF, CPU_ON,
+AFFINITY_INFO, MIGRATE_INFO_TYPE, SYSTEM_OFF and SYSTEM_RESET. It is a limited
+lifecycle profile, not a claim of complete PSCI 0.2 or ARM KVM ABI support.
+`KVM_ARM_PREFERRED_TARGET` includes `KVM_ARM_VCPU_PSCI_0_2`, which the initial
+`KVM_ARM_VCPU_INIT` requires; `POWER_OFF` controls the initial MP state. The
+PSCI version one-reg interface only accepts 0.2. Repeated INIT, CPU_SUSPEND,
+PSCI_FEATURES, RESET2 and full VM reconstruction in place are not supported
+in this batch. Timer-aware suspend and repeated INIT/cache reset remain
+separate work. The static frontend retains its basic CPU_ON/CPU_OFF/poweroff
+uses and is not the ARM KVM control implementation.
+
+`SET_MP_STATE` is allowed concurrently with an active `KVM_RUN` and coordinates
+through the entry gate and kick/wake protocol. This is broader asynchronous
+control than Linux 6.12 native KVM, which serializes that ioctl with the vCPU
+mutex. It must not be described as identical native ioctl semantics. Whole
+ioctl migration pinning, WFI/idle handling and irqfd listener differences also
+remain as described in the comparison document.
+
+The former HVC RESET and physical-SMC-forwarding blockers describe the old
+4152 snapshot, not this implementation. Validate Firecracker exit/join/cleanup
+and the retained synchronous-stop extension separately, first in isolated
+QEMU and then on the board. This document records no runtime result or board
+admission verdict.
 
 ## Reproducible checks
 
@@ -130,6 +177,9 @@ implementation; resolve the shared Core PSCI contract before board admission.
   scope, scheduling and a disabled-handoff negative control.
 - `tools/axvisor/tests/arm64-shared/`: shared-Core VM creation, failed device
   copyout rollback, MMIO exit, memory teardown and fd balance.
+- `tools/axvisor/tests/arm64-psci/`: HVC/SMC system-event ABI, unsupported calls,
+  CPU_ON register ordering, synchronous all-vCPU stop and signal interruption;
+  the runner defaults to `axvisor_linux.watchdog=0`.
 - `tools/axvisor/tests/arm64-linux-guest/`: real Firecracker/Linux CPU, timer,
   block I/O, poweroff and separately recorded restart behavior.
 
